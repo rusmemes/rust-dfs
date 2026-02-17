@@ -19,13 +19,12 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn stop(&self) -> ServerResult<()> {
-        self.cancellation_token.cancel();
-        let mut subtasks = self.subtasks.lock().await;
-        while let Some(res) = subtasks.join_next().await {
-            res?
+
+    pub fn new() -> Self {
+        Self {
+            cancellation_token: CancellationToken::new(),
+            subtasks: Arc::new(Mutex::new(JoinSet::new())),
         }
-        Ok(())
     }
 
     pub async fn start(&self) -> ServerResult<()> {
@@ -45,10 +44,13 @@ impl Server {
 
         Ok(())
     }
-    pub fn new() -> Self {
-        Self {
-            cancellation_token: CancellationToken::new(),
-            subtasks: Arc::new(Mutex::new(JoinSet::new())),
+
+    pub async fn stop(&self) -> ServerResult<()> {
+        self.cancellation_token.cancel();
+        let mut subtasks = self.subtasks.lock().await;
+        while let Some(res) = subtasks.join_next().await {
+            res?
         }
+        Ok(())
     }
 }
