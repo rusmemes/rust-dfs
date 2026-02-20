@@ -13,7 +13,7 @@ use libp2p::{
     dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, request_response, tcp,
     yamux, StreamProtocol, Swarm, TransportError,
 };
-use log::{debug, error, info};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::path::PathBuf;

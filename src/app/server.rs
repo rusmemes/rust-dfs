@@ -1,6 +1,6 @@
 use crate::app::{P2pNetworkError, P2pService, P2pServiceConfig};
 use async_trait::async_trait;
-use log::info;
+use log::{error, info};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -30,9 +30,9 @@ pub trait Service: Send + Sync + 'static {
 }
 
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(cancellation_token: CancellationToken) -> Self {
         Self {
-            cancellation_token: CancellationToken::new(),
+            cancellation_token,
             subtasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -52,7 +52,12 @@ impl Server {
         let mut subtasks = self.subtasks.lock().await;
 
         subtasks.push(tokio::spawn(async move {
-            service.start(cancellation_token).await
+            let result = service.start(cancellation_token.child_token()).await;
+            if let Err(error) = result {
+                error!(target: LOG_TARGET, "{}", error);
+                cancellation_token.cancel();
+            }
+            Ok(())
         }));
 
         Ok(())
@@ -63,7 +68,16 @@ impl Server {
         self.cancellation_token.cancel();
         let mut subtasks = self.subtasks.lock().await;
         for handle in subtasks.iter_mut() {
-            handle.await??
+            match handle.await {
+                Ok(result) => {
+                    if let Err(e) = result {
+                        error!(target: LOG_TARGET, "{}", e);
+                    }
+                }
+                Err(error) => {
+                    error!(target: LOG_TARGET, "{}", error);
+                }
+            }
         }
         Ok(())
     }
