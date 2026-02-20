@@ -79,16 +79,8 @@ impl P2pService {
     async fn keypair(&self) -> Result<Keypair, P2pNetworkError> {
         let exists = tokio::fs::try_exists(&self.config.keypair_file).await?;
         if exists {
-            match tokio::fs::read(&self.config.keypair_file).await {
-                Ok(data) => Ok(Keypair::from_protobuf_encoding(data.as_slice())?),
-                Err(error) => {
-                    error!("Error reading keypair file: {}", error);
-                    let keypair = Keypair::generate_ed25519();
-                    let encoded = keypair.to_protobuf_encoding()?;
-                    tokio::fs::write(&self.config.keypair_file, &encoded).await?;
-                    Ok(keypair)
-                }
-            }
+            let data = tokio::fs::read(&self.config.keypair_file).await?;
+            Ok(Keypair::from_protobuf_encoding(data.as_slice())?)
         } else {
             let dir = self.config.keypair_file.parent().ok_or(
                 P2pNetworkError::FailedToGetKeypairFileDir(self.config.keypair_file.clone()),
@@ -183,13 +175,13 @@ impl P2pService {
                 P2pNetworkBehaviourEvent::RelayClient(_) => {}
                 P2pNetworkBehaviourEvent::Dcutr(_) => {}
                 P2pNetworkBehaviourEvent::FileDownload(_) => {}
-                _ => Self::log_debug(&event)
+                _ => Self::log_debug(&event),
             },
             SwarmEvent::NewListenAddr {
                 listener_id: _listener_id,
                 address,
             } => info!(target: LOG_TARGET, "Listening on {:?}", address),
-            _ => Self::log_debug(&event)
+            _ => Self::log_debug(&event),
         }
 
         Ok(())
@@ -227,7 +219,7 @@ impl P2pService {
                     }
                 }
             }
-            _ => Self::log_debug(&event)
+            _ => Self::log_debug(&event),
         }
         Ok(())
     }
