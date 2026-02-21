@@ -85,12 +85,21 @@ fn gossipsub(_swarm: &mut Swarm<P2pNetworkBehaviour>, event: gossipsub::Event) {
 
 fn mdns(swarm: &mut Swarm<P2pNetworkBehaviour>, event: mdns::Event) {
     use mdns::Event::*;
+
     match event {
-        Discovered(new_peers) => {
-            for (peer_id, addr) in new_peers {
-                info!(target: LOG_TARGET, "[mDNS] Discovered peer {:?} at {:?}", peer_id, addr);
-                swarm.add_peer_address(peer_id, addr.clone());
-                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+        Discovered(peers) => {
+            for (peer_id, addr) in peers {
+                info!(target: LOG_TARGET, "[mDNS] Discovered {:?} at {:?}", peer_id, addr);
+
+                if is_dialable(&addr) {
+                    swarm.add_peer_address(peer_id, addr.clone());
+                }
+
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.clone());
+
                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
             }
         }
@@ -100,16 +109,17 @@ fn mdns(swarm: &mut Swarm<P2pNetworkBehaviour>, event: mdns::Event) {
 
 fn identify(swarm: &mut Swarm<P2pNetworkBehaviour>, event: identify::Event) {
     use identify::Event::*;
+
     match event {
         Received {
-            connection_id: _connection_id,
+            connection_id: _,
             peer_id,
             info,
         } => {
             let is_relay = info
                 .protocols
                 .iter()
-                .any(|protocol| *protocol == relay::HOP_PROTOCOL_NAME);
+                .any(|p| *p == relay::HOP_PROTOCOL_NAME);
 
             for addr in info.listen_addrs {
                 swarm
@@ -117,15 +127,32 @@ fn identify(swarm: &mut Swarm<P2pNetworkBehaviour>, event: identify::Event) {
                     .kademlia
                     .add_address(&peer_id, addr.clone());
 
+                if is_dialable(&addr) {
+                    swarm.add_peer_address(peer_id, addr.clone());
+                }
+
                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
 
                 if is_relay {
-                    let listen_addr = addr.with_p2p(peer_id).unwrap().with(Protocol::P2pCircuit);
+                    if let Ok(relay_addr) = addr
+                        .clone()
+                        .with_p2p(peer_id)
+                        .map(|a| a.with(Protocol::P2pCircuit))
+                    {
+                        info!(
+                            target: LOG_TARGET,
+                            "Listening via relay {}",
+                            relay_addr
+                        );
 
-                    info!(target: LOG_TARGET, "Trying to listen on relay address {}", listen_addr);
-
-                    if let Err(error) = swarm.listen_on(listen_addr.clone()) {
-                        warn!(target: LOG_TARGET, "Error listen on relay using address {}: {}", listen_addr, error);
+                        if let Err(e) = swarm.listen_on(relay_addr.clone()) {
+                            warn!(
+                                target: LOG_TARGET,
+                                "Relay listen error on {}: {}",
+                                relay_addr,
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -136,4 +163,26 @@ fn identify(swarm: &mut Swarm<P2pNetworkBehaviour>, event: identify::Event) {
 
 fn log_debug<T: Debug>(event: &T) {
     debug!(target: LOG_TARGET, "{:?}", event);
+}
+
+fn is_dialable(addr: &libp2p::Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback() || ip.is_unspecified() {
+                    return false;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() || ip.is_unspecified() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
 }
