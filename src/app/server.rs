@@ -1,26 +1,15 @@
-use crate::app::grpc::server::{GrpcServerError, GrpcService};
+use crate::app::errors::ServerError;
+use crate::app::grpc::server::GrpcService;
 use crate::app::p2p::config::P2pServiceConfig;
-use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::service::P2pService;
 use async_trait::async_trait;
 use log::{error, info};
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::Mutex;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const LOG_TARGET: &str = "app::server";
-
-#[derive(Debug, Error)]
-pub enum ServerError {
-    #[error("Task join error: {0}")]
-    TaskJoin(#[from] JoinError),
-    #[error("P2P Network error: {0}")]
-    P2pNetwork(#[from] P2pNetworkError),
-    #[error("GRPC Server error: {0}")]
-    GrpcServer(#[from] GrpcServerError),
-}
 
 pub type ServerResult<T> = Result<T, ServerError>;
 

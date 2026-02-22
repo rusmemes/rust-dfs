@@ -1,7 +1,7 @@
+use crate::app::errors::ServerError;
 use crate::app::p2p::domain::{
     FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
-use crate::app::server::ServerError;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, identify, mdns, relay, request_response, Swarm};

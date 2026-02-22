@@ -2,27 +2,19 @@ pub mod publish {
     tonic::include_proto!("publish");
 }
 
+use crate::app::errors::ServerError;
+use crate::app::grpc::errors::GrpcServerError;
 use crate::app::grpc::server::publish::publish_file_response;
-use crate::app::server::{ServerError, Service};
+use crate::app::server::Service;
 use async_trait::async_trait;
 use log::info;
 use publish::publish_service_server::{PublishService as Publish, PublishServiceServer};
 use publish::{PublishFileRequest, PublishFileResponse};
-use std::net::AddrParseError;
-use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 const LOG_TARGET: &str = "app::grpc::server";
-
-#[derive(Debug, Error)]
-pub enum GrpcServerError {
-    #[error("Failed to parse address: {0}")]
-    AddressParse(#[from] AddrParseError),
-    #[error("GRPC transport error: {0}")]
-    Transport(#[from] tonic::transport::Error),
-}
 
 pub struct PublishService {}
 

@@ -1,8 +1,9 @@
+use crate::app::errors::ServerError;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::P2pNetworkBehaviour;
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::events::handle_swarm_event;
-use crate::app::server::{ServerError, Service};
+use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::IdentTopic;
