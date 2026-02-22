@@ -1,5 +1,7 @@
 use crate::app::grpc::server::{GrpcServerError, GrpcService};
-use crate::app::{P2pNetworkError, P2pService, P2pServiceConfig};
+use crate::app::p2p::config::P2pServiceConfig;
+use crate::app::p2p::errors::P2pNetworkError;
+use crate::app::p2p::service::P2pService;
 use async_trait::async_trait;
 use log::{error, info};
 use std::sync::Arc;

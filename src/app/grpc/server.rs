@@ -3,7 +3,7 @@ pub mod publish {
 }
 
 use crate::app::grpc::server::publish::publish_file_response;
-use crate::app::{ServerError, Service};
+use crate::app::server::{ServerError, Service};
 use async_trait::async_trait;
 use log::info;
 use publish::publish_service_server::{PublishService as Publish, PublishServiceServer};

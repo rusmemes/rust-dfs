@@ -1,7 +1,5 @@
 pub mod server;
-pub use server::*;
 
-mod service;
-pub use service::*;
+pub mod p2p;
 
-mod grpc;
+pub mod grpc;

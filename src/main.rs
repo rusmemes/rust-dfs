@@ -1,6 +1,7 @@
-use app::Server;
+use crate::app::server::Server;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
+
 mod app;
 
 #[tokio::main]
