@@ -4,12 +4,14 @@ pub mod publish {
 
 use crate::app::errors::ServerError;
 use crate::app::grpc::errors::GrpcServerError;
-use crate::app::grpc::server::publish::publish_file_response;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use log::info;
 use publish::publish_service_server::{PublishService as Publish, PublishServiceServer};
 use publish::{PublishFileRequest, PublishFileResponse};
+use std::path::{Path, PathBuf};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -30,10 +32,56 @@ impl Publish for PublishService {
         &self,
         request: Request<PublishFileRequest>,
     ) -> Result<Response<PublishFileResponse>, Status> {
-        info!(target: LOG_TARGET, "We got a new publish file request: {:?}", request);
-        Ok(Response::new(PublishFileResponse {
-            result: Some(publish_file_response::Result::Ok(())),
-        }))
+        let request = request.into_inner();
+
+        let metadata = tokio::fs::metadata(request.file_path.clone())
+            .await
+            .map_err(|_| Status::internal("cannot get file metadata"))?;
+
+        if !metadata.is_file() {
+            return Err(Status::internal("not a file"));
+        }
+
+        let file = File::open(request.file_path.clone())
+            .await
+            .map_err(|_| Status::internal("cannot open file"))?;
+
+        let file_path = PathBuf::from(request.file_path);
+
+        let containing_dir = file_path
+            .parent()
+            .ok_or_else(|| Status::internal("cannot get parent dir"))?;
+
+        let file_name = file_path
+            .file_name()
+            .ok_or_else(|| Status::internal("cannot get file name"))?;
+
+        let pieces_dir = Path::new(containing_dir).join(format!(
+            "{}_chunks",
+            file_name.to_string_lossy().replace(".", "_")
+        ));
+
+        tokio::fs::create_dir_all(&pieces_dir).await?;
+
+        let mut buffer = [0; 1024 * 1024]; // 1mb
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut chunk_number = 0;
+        loop {
+            let size_read = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|_| Status::internal("cannot read the file"))?;
+
+            if size_read == 0 {
+                break;
+            }
+
+            let path = pieces_dir.join(format!("{}.chunk", chunk_number));
+            tokio::fs::write(&path, &buffer[0..size_read]).await?;
+            chunk_number += 1;
+        }
+
+        Ok(Response::new(PublishFileResponse { ok: Some(()) }))
     }
 }
 

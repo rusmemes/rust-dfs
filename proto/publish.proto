@@ -10,16 +10,9 @@ service PublishService {
 
 message PublishFileRequest {
     string file_path = 1;
-}
-
-message Error {
-    string message = 1;
     bool public = 2;
 }
 
 message PublishFileResponse {
-    oneof result {
-        google.protobuf.Empty ok = 1;
-        Error error = 2;
-    }
+    google.protobuf.Empty ok = 1;
 }
