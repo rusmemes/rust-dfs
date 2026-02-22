@@ -3,3 +3,5 @@ pub use server::*;
 
 mod service;
 pub use service::*;
+
+mod grpc;

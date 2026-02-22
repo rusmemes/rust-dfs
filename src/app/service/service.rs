@@ -117,12 +117,11 @@ impl Service for P2pService {
 
         for addr in ["/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"] {
             swarm
-                .listen_on(addr.parse().map_err(|error| {
-                    ServerError::P2pNetwork(P2pNetworkError::Libp2pMultiAddrParse(error))
-                })?)
-                .map_err(|error| {
-                    ServerError::P2pNetwork(P2pNetworkError::Libp2pTransport(error))
-                })?;
+                .listen_on(
+                    addr.parse()
+                        .map_err(|error| P2pNetworkError::Libp2pMultiAddrParse(error))?,
+                )
+                .map_err(|error| P2pNetworkError::Libp2pTransport(error))?;
         }
 
         swarm.behaviour_mut().kademlia.set_mode(Some(Mode::Server));

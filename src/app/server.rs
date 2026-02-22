@@ -1,3 +1,4 @@
+use crate::app::grpc::server::{GrpcServerError, GrpcService};
 use crate::app::{P2pNetworkError, P2pService, P2pServiceConfig};
 use async_trait::async_trait;
 use log::{error, info};
@@ -15,6 +16,8 @@ pub enum ServerError {
     TaskJoin(#[from] JoinError),
     #[error("P2P Network error: {0}")]
     P2pNetwork(#[from] P2pNetworkError),
+    #[error("GRPC Server error: {0}")]
+    GrpcServer(#[from] GrpcServerError),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -44,6 +47,10 @@ impl Server {
                 .build(),
         );
         self.spawn_task(p2p_service).await?;
+
+        let grpc_service = GrpcService::new(9999);
+        self.spawn_task(grpc_service).await?;
+
         Ok(())
     }
 

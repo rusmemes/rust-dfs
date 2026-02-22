@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package publish;
+
+import "google/protobuf/empty.proto";
+
+service PublishService {
+    rpc PublishFile (PublishFileRequest) returns (PublishFileResponse);
+}
+
+message PublishFileRequest {
+    string file_path = 1;
+}
+
+message Error {
+    string message = 1;
+}
+
+message PublishFileResponse {
+    oneof result {
+        google.protobuf.Empty ok = 1;
+        Error error = 2;
+    }
+}
