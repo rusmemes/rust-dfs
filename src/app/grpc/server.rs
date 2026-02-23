@@ -1,5 +1,5 @@
 use crate::app::errors::ServerError;
-use crate::app::file_processing::processing::split_file;
+use crate::app::file_processing::processing::{split_file, FileSplitResult};
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::grpc::publish::publish_service_server::PublishService as Publish;
 use crate::app::grpc::publish::publish_service_server::PublishServiceServer;
@@ -8,6 +8,8 @@ use crate::app::grpc::publish::PublishFileResponse;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use log::info;
+use rs_merkle::algorithms::Sha256;
+use rs_merkle::{Hasher, MerkleProof};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -24,11 +26,26 @@ impl Publish for PublishService {
     ) -> Result<Response<PublishFileResponse>, Status> {
         let request = request.into_inner();
 
-        let file_split_result = split_file(&request.file_path)
+        let FileSplitResult {
+            original_file_path: _original_file_path,
+            total_chunks,
+            target_dir,
+            merkle_root,
+            merkle_proofs,
+        } = split_file(&request.file_path)
             .await
             .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
-        info!(target: LOG_TARGET, "Split file successfully: {:?}", file_split_result);
+        let chunk_index = 10;
+        let merkle_proof =
+            MerkleProof::<Sha256>::try_from(merkle_proofs[chunk_index].as_slice()).unwrap();
+
+        let bytes = tokio::fs::read(target_dir.join(format!("{}.chunk", chunk_index))).await?;
+        let leaf = Sha256::hash(&bytes);
+
+        let valid = merkle_proof.verify(merkle_root, &[chunk_index], &[leaf], total_chunks);
+
+        info!(target: LOG_TARGET, "valid: {}", valid);
 
         Ok(Response::new(PublishFileResponse { ok: Some(()) }))
     }

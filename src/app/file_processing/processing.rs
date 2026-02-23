@@ -1,4 +1,6 @@
 use crate::app::file_processing::errors::FileProcessingError;
+use rs_merkle::algorithms::Sha256;
+use rs_merkle::{Hasher, MerkleTree};
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -6,8 +8,10 @@ use tokio::io::AsyncReadExt;
 #[derive(Debug)]
 pub struct FileSplitResult<'a> {
     pub original_file_path: &'a str,
-    pub total_chunks: u32,
+    pub total_chunks: usize,
     pub target_dir: PathBuf,
+    pub merkle_root: [u8; 32],
+    pub merkle_proofs: Vec<Vec<u8>>,
 }
 
 pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProcessingError> {
@@ -41,22 +45,31 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProc
 
     tokio::fs::create_dir_all(&pieces_dir).await?;
 
-    let total_chunks = split(file, &pieces_dir).await?;
+    let merkle_tree_leaves = split(file, &pieces_dir).await?;
+    let merkle_tree = MerkleTree::<Sha256>::from_leaves(&merkle_tree_leaves);
+    let merkle_root = merkle_tree.root().ok_or_else(|| {
+        FileProcessingError::MerkleTreeCreation("cannot get merkle root".to_owned())
+    })?;
+
+    let merkle_proofs = (0usize..merkle_tree_leaves.len())
+        .map(|index| merkle_tree.proof(&[index]).to_bytes())
+        .collect::<Vec<_>>();
 
     Ok(FileSplitResult {
         original_file_path,
-        total_chunks,
+        total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
+        merkle_root,
+        merkle_proofs,
     })
 }
 
-async fn split(file: File, pieces_dir: &PathBuf) -> Result<u32, FileProcessingError> {
+async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FileProcessingError> {
     const CHUNK_SIZE: usize = 1024 * 1024; // 1mb
     let mut heap_buffer = vec![0u8; CHUNK_SIZE];
 
     let mut reader = tokio::io::BufReader::new(file);
-    let mut chunk_number: u32 = 0;
-
+    let mut merkle_tree_leaves: Vec<[u8; 32]> = Vec::new();
     loop {
         let mut filled = 0;
 
@@ -77,10 +90,11 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<u32, FileProcessingEr
             break;
         }
 
-        let path = pieces_dir.join(format!("{}.chunk", chunk_number));
-        tokio::fs::write(&path, &heap_buffer[..filled]).await?;
-        chunk_number += 1;
+        let path = pieces_dir.join(format!("{}.chunk", merkle_tree_leaves.len()));
+        let bytes = &heap_buffer[..filled];
+        tokio::fs::write(&path, bytes).await?;
+        merkle_tree_leaves.push(Sha256::hash(bytes))
     }
 
-    Ok(chunk_number)
+    Ok(merkle_tree_leaves)
 }

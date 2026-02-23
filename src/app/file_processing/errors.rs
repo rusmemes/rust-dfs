@@ -6,4 +6,6 @@ pub enum FileProcessingError {
     FileAccess(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Merkle tree cannot be created: {0}")]
+    MerkleTreeCreation(String),
 }
