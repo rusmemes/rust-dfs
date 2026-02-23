@@ -41,11 +41,21 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProc
 
     tokio::fs::create_dir_all(&pieces_dir).await?;
 
+    let total_chunks = split(file, &pieces_dir).await?;
+
+    Ok(FileSplitResult {
+        original_file_path,
+        total_chunks,
+        target_dir: pieces_dir,
+    })
+}
+
+async fn split(file: File, pieces_dir: &PathBuf) -> Result<u32, FileProcessingError> {
     const CHUNK_SIZE: usize = 1024 * 1024; // 1mb
     let mut heap_buffer = vec![0u8; CHUNK_SIZE];
 
     let mut reader = tokio::io::BufReader::new(file);
-    let mut total_chunks: u32 = 0;
+    let mut chunk_number: u32 = 0;
 
     loop {
         let mut filled = 0;
@@ -54,9 +64,7 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProc
             let size_read = reader
                 .read(&mut heap_buffer[filled..])
                 .await
-                .map_err(|_| FileProcessingError::FileAccess(
-                    "cannot read the file".to_owned()
-                ))?;
+                .map_err(|_| FileProcessingError::FileAccess("cannot read the file".to_owned()))?;
 
             if size_read == 0 {
                 break;
@@ -69,14 +77,10 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProc
             break;
         }
 
-        let path = pieces_dir.join(format!("{}.chunk", total_chunks));
+        let path = pieces_dir.join(format!("{}.chunk", chunk_number));
         tokio::fs::write(&path, &heap_buffer[..filled]).await?;
-        total_chunks += 1;
+        chunk_number += 1;
     }
 
-    Ok(FileSplitResult {
-        original_file_path,
-        total_chunks,
-        target_dir: pieces_dir,
-    })
+    Ok(chunk_number)
 }
