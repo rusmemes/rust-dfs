@@ -1,30 +1,20 @@
-pub mod publish {
-    tonic::include_proto!("publish");
-}
-
 use crate::app::errors::ServerError;
+use crate::app::file_processing::processing::split_file;
 use crate::app::grpc::errors::GrpcServerError;
+use crate::app::grpc::publish::publish_service_server::PublishService as Publish;
+use crate::app::grpc::publish::publish_service_server::PublishServiceServer;
+use crate::app::grpc::publish::PublishFileRequest;
+use crate::app::grpc::publish::PublishFileResponse;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use log::info;
-use publish::publish_service_server::{PublishService as Publish, PublishServiceServer};
-use publish::{PublishFileRequest, PublishFileResponse};
-use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 const LOG_TARGET: &str = "app::grpc::server";
 
-pub struct PublishService {}
-
-impl PublishService {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+pub struct PublishService;
 
 #[tonic::async_trait]
 impl Publish for PublishService {
@@ -34,52 +24,11 @@ impl Publish for PublishService {
     ) -> Result<Response<PublishFileResponse>, Status> {
         let request = request.into_inner();
 
-        let metadata = tokio::fs::metadata(request.file_path.clone())
+        let file_split_result = split_file(&request.file_path)
             .await
-            .map_err(|_| Status::internal("cannot get file metadata"))?;
+            .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
-        if !metadata.is_file() {
-            return Err(Status::internal("not a file"));
-        }
-
-        let file = File::open(request.file_path.clone())
-            .await
-            .map_err(|_| Status::internal("cannot open file"))?;
-
-        let file_path = PathBuf::from(request.file_path);
-
-        let containing_dir = file_path
-            .parent()
-            .ok_or_else(|| Status::internal("cannot get parent dir"))?;
-
-        let file_name = file_path
-            .file_name()
-            .ok_or_else(|| Status::internal("cannot get file name"))?;
-
-        let pieces_dir = Path::new(containing_dir).join(format!(
-            "{}_chunks",
-            file_name.to_string_lossy().replace(".", "_")
-        ));
-
-        tokio::fs::create_dir_all(&pieces_dir).await?;
-
-        let mut buffer = [0; 1024 * 1024]; // 1mb
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut chunk_number = 0;
-        loop {
-            let size_read = reader
-                .read(&mut buffer)
-                .await
-                .map_err(|_| Status::internal("cannot read the file"))?;
-
-            if size_read == 0 {
-                break;
-            }
-
-            let path = pieces_dir.join(format!("{}.chunk", chunk_number));
-            tokio::fs::write(&path, &buffer[0..size_read]).await?;
-            chunk_number += 1;
-        }
+        info!(target: LOG_TARGET, "Split file successfully: {:?}", file_split_result);
 
         Ok(Response::new(PublishFileResponse { ok: Some(()) }))
     }
@@ -106,7 +55,7 @@ impl Service for GrpcService {
         info!(target: LOG_TARGET, "Grpc Server is starting at {}", grpc_address);
 
         Server::builder()
-            .add_service(PublishServiceServer::new(PublishService::new()))
+            .add_service(PublishServiceServer::new(PublishService))
             .serve_with_shutdown(grpc_address, cancellation_token.cancelled())
             .await
             .map_err(|error| GrpcServerError::Transport(error))?;
