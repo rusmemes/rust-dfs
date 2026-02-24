@@ -1,12 +1,13 @@
 use crate::app::errors::ServerError;
+use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::P2pNetworkBehaviour;
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::p2p::events::handle_swarm_event;
+use crate::app::p2p::events::{file_publish, handle_swarm_event};
 use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
-use libp2p::gossipsub::IdentTopic;
+use libp2p::gossipsub::{IdentTopic, Topic};
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::Mode;
@@ -20,17 +21,22 @@ use log::info;
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
+use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 
 const LOG_TARGET: &str = "app::p2p::service";
 
 pub struct P2pService {
     config: P2pServiceConfig,
+    file_publish_receiver: Receiver<FileProcessingResult>,
 }
 
 impl P2pService {
-    pub fn new(config: P2pServiceConfig) -> Self {
-        Self { config }
+    pub fn new(config: P2pServiceConfig, file_publish_receiver: Receiver<FileProcessingResult>) -> Self {
+        Self {
+            config,
+            file_publish_receiver,
+        }
     }
 
     async fn keypair(&self) -> Result<Keypair, P2pNetworkError> {
@@ -119,7 +125,7 @@ fn with_behaviour(
 
 #[async_trait]
 impl Service for P2pService {
-    async fn start(&self, cancellation_token: CancellationToken) -> Result<(), ServerError> {
+    async fn start(&mut self, cancellation_token: CancellationToken) -> Result<(), ServerError> {
         let mut swarm = self.swarm().await?;
 
         for addr in ["/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"] {
@@ -144,6 +150,7 @@ impl Service for P2pService {
 
         loop {
             select! {
+                Some(file_split_result) = self.file_publish_receiver.recv() => file_publish(&mut swarm, file_split_result, &file_owners_topic)?,
                 event = swarm.select_next_some() => handle_swarm_event(&mut swarm, event)?,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");

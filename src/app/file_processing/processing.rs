@@ -7,15 +7,26 @@ use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+pub const FILE_CHUNK_EXTENSION: &str = "chunk";
+
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FileSplitResult {
+pub struct FileProcessingResult {
     pub total_chunks: usize,
     pub target_dir: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_proofs: Vec<Vec<u8>>,
+    pub chunk_file_extension: String,
+    pub public: bool,
 }
 
-pub async fn split_file(file_path: &str) -> Result<FileSplitResult, FileProcessingError> {
+impl FileProcessingResult {
+    pub fn hash(&self) -> anyhow::Result<[u8; 32]> {
+        let bytes = serde_cbor::to_vec(self)?;
+        Ok(Sha256::hash(&bytes))
+    }
+}
+
+pub async fn process_file(file_path: &str, public: bool) -> Result<FileProcessingResult, FileProcessingError> {
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(|_| FileProcessingError::FileAccess("File metadata not found".to_owned()))?;
@@ -56,11 +67,13 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult, FileProcessi
         .map(|index| merkle_tree.proof(&[index]).to_bytes())
         .collect::<Vec<_>>();
 
-    let file_split_result = FileSplitResult {
+    let file_split_result = FileProcessingResult {
         total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
         merkle_root,
         merkle_proofs,
+        chunk_file_extension: String::from(FILE_CHUNK_EXTENSION),
+        public,
     };
 
     Ok(save(file_split_result).await?)
@@ -92,7 +105,7 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
             break;
         }
 
-        let path = pieces_dir.join(format!("{}.chunk", merkle_tree_leaves.len()));
+        let path = pieces_dir.join(format!("{}.{FILE_CHUNK_EXTENSION}", merkle_tree_leaves.len()));
         let bytes = &heap_buffer[..filled];
         tokio::fs::write(&path, bytes).await?;
         merkle_tree_leaves.push(Sha256::hash(bytes))
@@ -101,11 +114,11 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
     Ok(merkle_tree_leaves)
 }
 
-async fn save(result: FileSplitResult) -> Result<FileSplitResult, FileProcessingError> {
+async fn save(result: FileProcessingResult) -> Result<FileProcessingResult, FileProcessingError> {
     tokio::task::spawn_blocking(move || save_blocking(result)).await?
 }
 
-fn save_blocking(result: FileSplitResult) -> Result<FileSplitResult, FileProcessingError> {
+fn save_blocking(result: FileProcessingResult) -> Result<FileProcessingResult, FileProcessingError> {
     const METADATA_FILE_NAME: &str = "files.cbor";
     let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
     let writer = BufWriter::new(file);

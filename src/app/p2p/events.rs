@@ -1,7 +1,9 @@
 use crate::app::errors::ServerError;
+use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::p2p::domain::{
     FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
+use libp2p::gossipsub::IdentTopic;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, identify, mdns, relay, request_response, Swarm};
@@ -9,6 +11,15 @@ use log::{debug, info, warn};
 use std::fmt::Debug;
 
 const LOG_TARGET: &str = "app::p2p::events";
+
+pub fn file_publish(
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    file_split_result: FileProcessingResult,
+    topic: &IdentTopic,
+) -> Result<(), ServerError> {
+    let result = file_split_result.hash();
+    todo!()
+}
 
 pub fn handle_swarm_event(
     swarm: &mut Swarm<P2pNetworkBehaviour>,
