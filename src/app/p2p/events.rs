@@ -1,30 +1,59 @@
-use crate::app::errors::ServerError;
 use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::p2p::domain::{
     FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
+use crate::app::p2p::models::PublishedFile;
 use libp2p::gossipsub::IdentTopic;
+use libp2p::kad::{Quorum, Record};
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, identify, mdns, relay, request_response, Swarm};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use rs_sha256::Sha256Hasher;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 
 const LOG_TARGET: &str = "app::p2p::events";
 
+// TODO: what about retries?
 pub fn file_publish(
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     file_split_result: FileProcessingResult,
-    topic: &IdentTopic,
-) -> Result<(), ServerError> {
-    let result = file_split_result.hash();
-    todo!()
+    _topic: &IdentTopic,
+) {
+    let mut hasher = Sha256Hasher::default();
+    file_split_result.hash(&mut hasher);
+    let key = hasher.finish().to_be_bytes().to_vec();
+
+    match serde_cbor::to_vec(&PublishedFile {
+        total_chunks: file_split_result.total_chunks,
+        merkle_root: file_split_result.merkle_root,
+    }) {
+        Ok(value) => {
+            let record = Record::new(key, value);
+            let key = record.key.clone();
+            if let Err(error) = swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(record, Quorum::Majority)
+            {
+                error!("Failed to publish file split record: {}", error);
+            } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
+                error!("Failed to start providing file split record: {}", error);
+            } else {
+                info!("Successfully published file split record");
+            }
+        }
+        Err(error) => {
+            error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
+        }
+    }
 }
 
 pub fn handle_swarm_event(
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     event: SwarmEvent<P2pNetworkBehaviourEvent>,
-) -> Result<(), ServerError> {
+) {
     use P2pNetworkBehaviourEvent::*;
     use SwarmEvent::*;
     match event {
@@ -36,7 +65,7 @@ pub fn handle_swarm_event(
             RelayServer(event) => log_debug(&event),
             RelayClient(event) => log_debug(&event),
             Dcutr(event) => log_debug(&event),
-            FileDownload(event) => file_download(swarm, event)?,
+            FileDownload(event) => file_download(swarm, event),
             _ => log_debug(&event),
         },
         NewListenAddr {
@@ -45,14 +74,12 @@ pub fn handle_swarm_event(
         } => info!(target: LOG_TARGET, "Listening on {:?}", address),
         _ => log_debug(&event),
     }
-
-    Ok(())
 }
 
 fn file_download(
     _swarm: &mut Swarm<P2pNetworkBehaviour>,
     event: request_response::Event<FileChunkRequest, FileChunkResponse>,
-) -> Result<(), ServerError> {
+) {
     use request_response::Event::*;
     match event {
         Message {
@@ -79,7 +106,6 @@ fn file_download(
         }
         _ => log_debug(&event),
     }
-    Ok(())
 }
 
 fn gossipsub(_swarm: &mut Swarm<P2pNetworkBehaviour>, event: gossipsub::Event) {

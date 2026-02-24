@@ -31,6 +31,7 @@ impl Publish for PublishService {
             .await
             .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
+        // TODO: publishing must be guaranteed
         self.file_publish_sender
             .send(file_split_result)
             .await

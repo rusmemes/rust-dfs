@@ -2,6 +2,7 @@ use crate::app::file_processing::errors::FileProcessingError;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher, MerkleTree};
 use serde::{Deserialize, Serialize};
+use std::hash::Hash;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -11,6 +12,7 @@ pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessingResult {
+    pub original_file_path: String,
     pub total_chunks: usize,
     pub target_dir: PathBuf,
     pub merkle_root: [u8; 32],
@@ -19,10 +21,12 @@ pub struct FileProcessingResult {
     pub public: bool,
 }
 
-impl FileProcessingResult {
-    pub fn hash(&self) -> anyhow::Result<[u8; 32]> {
-        let bytes = serde_cbor::to_vec(self)?;
-        Ok(Sha256::hash(&bytes))
+impl Hash for FileProcessingResult {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.original_file_path.hash(state);
+        self.total_chunks.hash(state);
+        self.merkle_root.hash(state);
+        self.public.hash(state);
     }
 }
 
@@ -68,6 +72,7 @@ pub async fn process_file(file_path: &str, public: bool) -> Result<FileProcessin
         .collect::<Vec<_>>();
 
     let file_split_result = FileProcessingResult {
+        original_file_path: original_file_path.to_owned(),
         total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
         merkle_root,

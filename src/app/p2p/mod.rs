@@ -4,3 +4,4 @@ mod events;
 mod domain;
 
 pub mod errors;
+mod models;
