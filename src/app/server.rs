@@ -6,7 +6,6 @@ use crate::app::p2p::service::P2pService;
 use async_trait::async_trait;
 use log::{error, info};
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

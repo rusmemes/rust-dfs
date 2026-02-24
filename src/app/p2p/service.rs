@@ -7,7 +7,7 @@ use crate::app::p2p::events::{file_publish, handle_swarm_event};
 use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
-use libp2p::gossipsub::{IdentTopic, Topic};
+use libp2p::gossipsub::IdentTopic;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::Mode;
