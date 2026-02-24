@@ -10,12 +10,14 @@ use libp2p::gossipsub::IdentTopic;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::Mode;
+use libp2p::relay::client::Behaviour;
 use libp2p::request_response::cbor;
 use libp2p::{
     dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, request_response, tcp,
     yamux, StreamProtocol, Swarm,
 };
 use log::info;
+use std::error::Error;
 use std::time::Duration;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -60,57 +62,59 @@ impl P2pService {
             )?
             .with_quic()
             .with_relay_client(noise::Config::new, yamux::Config::default)?
-            .with_behaviour(|key_pair, relay_client| {
-                // kademlia config
-                let mut kad_config = kad::Config::new(StreamProtocol::new("/dfs/1.0.0/kad"));
-                kad_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(30)));
-
-                // gossipsub config
-                let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10))
-                    .validation_mode(gossipsub::ValidationMode::Strict)
-                    .build()?;
-
-                Ok(P2pNetworkBehaviour {
-                    ping: ping::Behaviour::new(ping::Config::default()),
-                    identify: identify::Behaviour::new(identify::Config::new(
-                        "/dfs/1.0.0".to_string(),
-                        key_pair.public(),
-                    )),
-                    mdns: mdns::Behaviour::new(
-                        mdns::Config::default(),
-                        key_pair.public().to_peer_id(),
-                    )?,
-                    kademlia: kad::Behaviour::with_config(
-                        key_pair.public().to_peer_id(),
-                        MemoryStore::new(key_pair.public().to_peer_id()),
-                        kad_config,
-                    ),
-                    gossipsub: gossipsub::Behaviour::new(
-                        gossipsub::MessageAuthenticity::Signed(key_pair.clone()),
-                        gossipsub_config,
-                    )?,
-                    relay_server: relay::Behaviour::new(
-                        key_pair.public().to_peer_id(),
-                        relay::Config::default(),
-                    ),
-                    relay_client,
-                    dcutr: dcutr::Behaviour::new(key_pair.public().to_peer_id()),
-                    file_download: cbor::Behaviour::new(
-                        [(
-                            StreamProtocol::new("/dfs/1.0.0/file-download"),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        request_response::Config::default(),
-                    ),
-                })
-            })
+            .with_behaviour(with_behaviour)
             .map_err(|e| P2pNetworkError::Libp2pSwarmBuilder(e.to_string()))?
             .with_swarm_config(|config| {
                 config.with_idle_connection_timeout(Duration::from_secs(30))
             })
             .build())
     }
+}
+
+fn with_behaviour(
+    key_pair: &Keypair,
+    relay_client: Behaviour,
+) -> Result<P2pNetworkBehaviour, Box<dyn Error + Send + Sync>> {
+    // kademlia config
+    let mut kad_config = kad::Config::new(StreamProtocol::new("/dfs/1.0.0/kad"));
+    kad_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(30)));
+
+    // gossipsub config
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(10))
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        .build()?;
+
+    Ok(P2pNetworkBehaviour {
+        ping: ping::Behaviour::new(ping::Config::default()),
+        identify: identify::Behaviour::new(identify::Config::new(
+            "/dfs/1.0.0".to_string(),
+            key_pair.public(),
+        )),
+        mdns: mdns::Behaviour::new(mdns::Config::default(), key_pair.public().to_peer_id())?,
+        kademlia: kad::Behaviour::with_config(
+            key_pair.public().to_peer_id(),
+            MemoryStore::new(key_pair.public().to_peer_id()),
+            kad_config,
+        ),
+        gossipsub: gossipsub::Behaviour::new(
+            gossipsub::MessageAuthenticity::Signed(key_pair.clone()),
+            gossipsub_config,
+        )?,
+        relay_server: relay::Behaviour::new(
+            key_pair.public().to_peer_id(),
+            relay::Config::default(),
+        ),
+        relay_client,
+        dcutr: dcutr::Behaviour::new(key_pair.public().to_peer_id()),
+        file_download: cbor::Behaviour::new(
+            [(
+                StreamProtocol::new("/dfs/1.0.0/file-download"),
+                request_response::ProtocolSupport::Full,
+            )],
+            request_response::Config::default(),
+        ),
+    })
 }
 
 #[async_trait]
