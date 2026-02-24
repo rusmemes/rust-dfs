@@ -1,20 +1,21 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher, MerkleTree};
+use serde::{Deserialize, Serialize};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-#[derive(Debug)]
-pub struct FileSplitResult<'a> {
-    pub original_file_path: &'a str,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileSplitResult {
     pub total_chunks: usize,
     pub target_dir: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_proofs: Vec<Vec<u8>>,
 }
 
-pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProcessingError> {
+pub async fn split_file(file_path: &str) -> Result<FileSplitResult, FileProcessingError> {
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(|_| FileProcessingError::FileAccess("File metadata not found".to_owned()))?;
@@ -55,13 +56,14 @@ pub async fn split_file(file_path: &str) -> Result<FileSplitResult<'_>, FileProc
         .map(|index| merkle_tree.proof(&[index]).to_bytes())
         .collect::<Vec<_>>();
 
-    Ok(FileSplitResult {
-        original_file_path,
+    let file_split_result = FileSplitResult {
         total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
         merkle_root,
         merkle_proofs,
-    })
+    };
+
+    Ok(save(file_split_result).await?)
 }
 
 async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FileProcessingError> {
@@ -97,4 +99,16 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
     }
 
     Ok(merkle_tree_leaves)
+}
+
+async fn save(result: FileSplitResult) -> Result<FileSplitResult, FileProcessingError> {
+    tokio::task::spawn_blocking(move || save_blocking(result)).await?
+}
+
+fn save_blocking(result: FileSplitResult) -> Result<FileSplitResult, FileProcessingError> {
+    const METADATA_FILE_NAME: &str = "files.cbor";
+    let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
+    let writer = BufWriter::new(file);
+    serde_cbor::to_writer(writer, &result)?;
+    Ok(result)
 }

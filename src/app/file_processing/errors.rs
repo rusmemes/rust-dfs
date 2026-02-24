@@ -1,4 +1,5 @@
 use thiserror::Error;
+use tokio::task::JoinError;
 
 #[derive(Debug, Error)]
 pub enum FileProcessingError {
@@ -8,4 +9,8 @@ pub enum FileProcessingError {
     Io(#[from] std::io::Error),
     #[error("Merkle tree cannot be created: {0}")]
     MerkleTreeCreation(String),
+    #[error("Metadata file cannot be created: {0}")]
+    Cbor(#[from] serde_cbor::Error),
+    #[error("Task join error: {0}")]
+    TaskJoin(#[from] JoinError),
 }

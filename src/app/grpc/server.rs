@@ -26,26 +26,11 @@ impl Publish for PublishService {
     ) -> Result<Response<PublishFileResponse>, Status> {
         let request = request.into_inner();
 
-        let FileSplitResult {
-            original_file_path: _original_file_path,
-            total_chunks,
-            target_dir,
-            merkle_root,
-            merkle_proofs,
-        } = split_file(&request.file_path)
+        let _ = split_file(&request.file_path)
             .await
             .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
-        let chunk_index = 10;
-        let merkle_proof =
-            MerkleProof::<Sha256>::try_from(merkle_proofs[chunk_index].as_slice()).unwrap();
-
-        let bytes = tokio::fs::read(target_dir.join(format!("{}.chunk", chunk_index))).await?;
-        let leaf = Sha256::hash(&bytes);
-
-        let valid = merkle_proof.verify(merkle_root, &[chunk_index], &[leaf], total_chunks);
-
-        info!(target: LOG_TARGET, "valid: {}", valid);
+        // todo
 
         Ok(Response::new(PublishFileResponse { ok: Some(()) }))
     }
