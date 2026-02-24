@@ -40,8 +40,6 @@ pub fn file_publish(
                 error!("Failed to publish file split record: {}", error);
             } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
                 error!("Failed to start providing file split record: {}", error);
-            } else {
-                info!("Successfully published file split record");
             }
         }
         Err(error) => {
