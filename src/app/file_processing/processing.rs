@@ -30,18 +30,17 @@ impl Hash for FileProcessingResult {
     }
 }
 
-pub async fn process_file(file_path: &str, public: bool) -> Result<FileProcessingResult, FileProcessingError> {
-    let metadata = tokio::fs::metadata(file_path)
-        .await
-        .map_err(|_| FileProcessingError::FileAccess("File metadata not found".to_owned()))?;
+pub async fn process_file(
+    file_path: &str,
+    public: bool,
+) -> Result<FileProcessingResult, FileProcessingError> {
+    let metadata = tokio::fs::metadata(file_path).await?;
 
     if !metadata.is_file() {
         return Err(FileProcessingError::FileAccess("Not a file".to_owned()));
     }
 
-    let file = File::open(file_path)
-        .await
-        .map_err(|_| FileProcessingError::FileAccess("cannot open file".to_owned()))?;
+    let file = File::open(file_path).await?;
 
     let original_file_path = file_path;
     let file_path = PathBuf::from(original_file_path);
@@ -94,10 +93,7 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
         let mut filled = 0;
 
         while filled < CHUNK_SIZE {
-            let size_read = reader
-                .read(&mut heap_buffer[filled..])
-                .await
-                .map_err(|_| FileProcessingError::FileAccess("cannot read the file".to_owned()))?;
+            let size_read = reader.read(&mut heap_buffer[filled..]).await?;
 
             if size_read == 0 {
                 break;
@@ -110,7 +106,10 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
             break;
         }
 
-        let path = pieces_dir.join(format!("{}.{FILE_CHUNK_EXTENSION}", merkle_tree_leaves.len()));
+        let path = pieces_dir.join(format!(
+            "{}.{FILE_CHUNK_EXTENSION}",
+            merkle_tree_leaves.len()
+        ));
         let bytes = &heap_buffer[..filled];
         tokio::fs::write(&path, bytes).await?;
         merkle_tree_leaves.push(Sha256::hash(bytes))
@@ -123,7 +122,9 @@ async fn save(result: FileProcessingResult) -> Result<FileProcessingResult, File
     tokio::task::spawn_blocking(move || save_blocking(result)).await?
 }
 
-fn save_blocking(result: FileProcessingResult) -> Result<FileProcessingResult, FileProcessingError> {
+fn save_blocking(
+    result: FileProcessingResult,
+) -> Result<FileProcessingResult, FileProcessingError> {
     const METADATA_FILE_NAME: &str = "files.cbor";
     let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
     let writer = BufWriter::new(file);
