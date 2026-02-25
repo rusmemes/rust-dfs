@@ -33,7 +33,7 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let (sender, receiver) = mpsc::channel::<FileProcessingResult>(1);
+        let (sender, receiver) = mpsc::channel::<FileProcessingResult>(0);
 
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()

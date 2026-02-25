@@ -31,11 +31,13 @@ impl Publish for PublishService {
             .await
             .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
-        // TODO: publishing must be guaranteed
-        self.file_publish_sender
-            .send(file_split_result)
-            .await
-            .map_err(|e| Status::internal(format!("failed to send file split result: {}", e)))?;
+        if self
+            .file_publish_sender
+            .try_send(file_split_result)
+            .is_err()
+        {
+            return Err(Status::internal("can't process the request now, try later"));
+        }
 
         Ok(Response::new(PublishFileResponse { ok: Some(()) }))
     }
@@ -64,6 +66,8 @@ impl Service for GrpcService {
             .map_err(|error| GrpcServerError::AddressParse(error))?;
 
         info!(target: LOG_TARGET, "Grpc Server is starting at {}", grpc_address);
+
+        // TODO: do replay
 
         Server::builder()
             .add_service(PublishServiceServer::new(PublishService {

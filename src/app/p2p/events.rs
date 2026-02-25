@@ -12,38 +12,45 @@ use log::{debug, error, info, warn};
 use rs_sha256::Sha256Hasher;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
+use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-// TODO: what about retries?
-pub fn file_publish(
+pub async fn file_publish(
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     file_split_result: FileProcessingResult,
     _topic: &IdentTopic,
 ) {
-    let mut hasher = Sha256Hasher::default();
-    file_split_result.hash(&mut hasher);
-    let key = hasher.finish().to_be_bytes().to_vec();
-
-    match serde_cbor::to_vec(&PublishedFile {
-        total_chunks: file_split_result.total_chunks,
-        merkle_root: file_split_result.merkle_root,
-    }) {
-        Ok(value) => {
-            let record = Record::new(key, value);
-            let key = record.key.clone();
-            if let Err(error) = swarm
-                .behaviour_mut()
-                .kademlia
-                .put_record(record, Quorum::Majority)
-            {
-                error!("Failed to publish file split record: {}", error);
-            } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
-                error!("Failed to start providing file split record: {}", error);
+    loop {
+        let mut hasher = Sha256Hasher::default();
+        file_split_result.hash(&mut hasher);
+        let key = hasher.finish().to_be_bytes().to_vec();
+        match serde_cbor::to_vec(&PublishedFile {
+            total_chunks: file_split_result.total_chunks,
+            merkle_root: file_split_result.merkle_root,
+        }) {
+            Ok(value) => {
+                let record = Record::new(key, value);
+                let key = record.key.clone();
+                if let Err(error) = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .put_record(record, Quorum::Majority)
+                {
+                    error!("Failed to publish file split record: {}", error);
+                    sleep(Duration::from_secs(1)).await
+                } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
+                    error!("Failed to start providing file split record: {}", error);
+                    sleep(Duration::from_secs(1)).await
+                } else {
+                    return;
+                }
             }
-        }
-        Err(error) => {
-            error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
+            Err(error) => {
+                error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
+                return;
+            }
         }
     }
 }

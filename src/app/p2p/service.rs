@@ -32,7 +32,10 @@ pub struct P2pService {
 }
 
 impl P2pService {
-    pub fn new(config: P2pServiceConfig, file_publish_receiver: Receiver<FileProcessingResult>) -> Self {
+    pub fn new(
+        config: P2pServiceConfig,
+        file_publish_receiver: Receiver<FileProcessingResult>,
+    ) -> Self {
         Self {
             config,
             file_publish_receiver,
@@ -150,7 +153,7 @@ impl Service for P2pService {
 
         loop {
             select! {
-                Some(file_split_result) = self.file_publish_receiver.recv() => file_publish(&mut swarm, file_split_result, &file_owners_topic),
+                Some(file_split_result) = self.file_publish_receiver.recv() => file_publish(&mut swarm, file_split_result, &file_owners_topic).await,
                 event = swarm.select_next_some() => handle_swarm_event(&mut swarm, event),
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
