@@ -1,4 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_store::{FileStoreError, PublishedFileRecord, Store};
 use crate::app::p2p::domain::{
     FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
@@ -9,48 +10,89 @@ use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, identify, mdns, relay, request_response, Swarm};
 use log::{debug, error, info, warn};
-use rs_sha256::Sha256Hasher;
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-pub async fn file_publish(
+pub async fn file_publish<S>(
+    store: &S,
     swarm: &mut Swarm<P2pNetworkBehaviour>,
-    file_split_result: FileProcessingResult,
+    result: Result<FileProcessingResult, FileStoreError>,
     _topic: &IdentTopic,
-) {
-    loop {
-        let mut hasher = Sha256Hasher::default();
-        file_split_result.hash(&mut hasher);
-        let key = hasher.finish().to_be_bytes().to_vec();
-        match serde_cbor::to_vec(&PublishedFile {
-            total_chunks: file_split_result.total_chunks,
-            merkle_root: file_split_result.merkle_root,
-        }) {
-            Ok(value) => {
-                let record = Record::new(key, value);
-                let key = record.key.clone();
-                if let Err(error) = swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .put_record(record, Quorum::Majority)
-                {
-                    error!("Failed to publish file split record: {}", error);
+) where
+    S: Store + Send + Sync + 'static,
+{
+    match result {
+        Ok(file_processing_result) => loop {
+            let key = file_processing_result.key();
+            match serde_cbor::to_vec(&PublishedFile {
+                total_chunks: file_processing_result.total_chunks,
+                merkle_root: file_processing_result.merkle_root,
+            }) {
+                Ok(value) => {
+                    let record = Record::new(key, value);
+                    let key = record.key.clone();
+                    if let Err(error) = swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .put_record(record, Quorum::Majority)
+                    {
+                        error!("Failed to publish file split record: {}", error);
+                        sleep(Duration::from_secs(1)).await
+                    } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
+                        error!("Failed to start providing file split record: {}", error);
+                        sleep(Duration::from_secs(1)).await
+                    } else {
+                        let key = file_processing_result.key();
+                        add_published_file(store, file_processing_result).await;
+                        delete_file_processing_result(store, key).await;
+                        info!("Successfully published a file");
+                        return;
+                    }
+                }
+                Err(error) => {
+                    error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
                     sleep(Duration::from_secs(1)).await
-                } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
-                    error!("Failed to start providing file split record: {}", error);
-                    sleep(Duration::from_secs(1)).await
-                } else {
-                    return;
                 }
             }
+        },
+        Err(error) => {
+            error!(target: LOG_TARGET, "File store error: {:?}", error);
+            sleep(Duration::from_secs(1)).await
+        }
+    }
+}
+
+async fn add_published_file<S>(store: &S, file_processing_result: FileProcessingResult)
+where
+    S: Store + Send + Sync + 'static,
+{
+    let published_file_record: PublishedFileRecord = file_processing_result.into();
+    while let Err(error) = store
+        .add_published_file(published_file_record.clone())
+        .await
+    {
+        error!("Failed to add published file: {}", error);
+        sleep(Duration::from_secs(1)).await
+    }
+}
+
+async fn delete_file_processing_result<S>(store: &S, file_processing_result_key: Vec<u8>)
+where
+    S: Store + Send + Sync + 'static,
+{
+    loop {
+        match store
+            .delete_file_processing_result(file_processing_result_key.clone())
+            .await
+        {
             Err(error) => {
-                error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
-                return;
+                error!(target: LOG_TARGET, "Error deleting file split record: {}", error);
+                sleep(Duration::from_secs(1)).await
             }
+            _ => break,
         }
     }
 }

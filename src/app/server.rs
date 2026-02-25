@@ -1,12 +1,13 @@
 use crate::app::errors::ServerError;
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_store::rocksdb::RocksDBStore;
 use crate::app::grpc::server::GrpcService;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::service::P2pService;
 use async_trait::async_trait;
 use log::{error, info};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -33,17 +34,18 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let (sender, receiver) = mpsc::channel::<FileProcessingResult>(0);
+
+        let store = RocksDBStore::new(PathBuf::from("./.file_store")).await?;
 
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file("./keys.keypair")
                 .build(),
-            receiver,
+            store.clone()
         );
         self.spawn_task(p2p_service).await?;
 
-        let grpc_service = GrpcService::new(9999, sender);
+        let grpc_service = GrpcService::new(9999, store);
         self.spawn_task(grpc_service).await?;
 
         Ok(())

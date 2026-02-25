@@ -1,3 +1,4 @@
+use crate::app::file_store::FileStoreError;
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::p2p::errors::P2pNetworkError;
 use thiserror::Error;
@@ -11,4 +12,6 @@ pub enum ServerError {
     P2pNetwork(#[from] P2pNetworkError),
     #[error("GRPC Server error: {0}")]
     GrpcServer(#[from] GrpcServerError),
+    #[error("File store error: {0}")]
+    FileStore(#[from] FileStoreError),
 }

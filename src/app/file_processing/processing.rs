@@ -1,8 +1,9 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use rs_merkle::algorithms::Sha256;
-use rs_merkle::{Hasher, MerkleTree};
+use rs_merkle::{Hasher as MerkleHasher, MerkleTree};
+use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -12,7 +13,7 @@ pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessingResult {
-    pub original_file_path: String,
+    pub original_file_name: String,
     pub total_chunks: usize,
     pub target_dir: PathBuf,
     pub merkle_root: [u8; 32],
@@ -21,12 +22,36 @@ pub struct FileProcessingResult {
     pub public: bool,
 }
 
+impl FileProcessingResult {
+    pub fn key(&self) -> Vec<u8> {
+        let mut hasher = Sha256Hasher::default();
+        self.hash(&mut hasher);
+        hasher.finish().to_be_bytes().to_vec()
+    }
+}
+
 impl Hash for FileProcessingResult {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.original_file_path.hash(state);
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.original_file_name.hash(state);
         self.total_chunks.hash(state);
         self.merkle_root.hash(state);
         self.public.hash(state);
+    }
+}
+
+impl TryFrom<Vec<u8>> for FileProcessingResult {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(&value)
+    }
+}
+
+impl TryFrom<FileProcessingResult> for Vec<u8> {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: FileProcessingResult) -> Result<Self, Self::Error> {
+        serde_cbor::to_vec(&value)
     }
 }
 
@@ -51,11 +76,12 @@ pub async fn process_file(
 
     let file_name = file_path
         .file_name()
-        .ok_or_else(|| FileProcessingError::FileAccess("cannot get file name".to_owned()))?;
+        .ok_or_else(|| FileProcessingError::FileAccess("cannot get file name".to_owned()))?
+        .to_string_lossy();
 
     let pieces_dir = Path::new(containing_dir).join(format!(
         "{}_chunks",
-        file_name.to_string_lossy().replace(".", "_")
+        file_name.replace(".", "_")
     ));
 
     tokio::fs::create_dir_all(&pieces_dir).await?;
@@ -71,7 +97,7 @@ pub async fn process_file(
         .collect::<Vec<_>>();
 
     let file_split_result = FileProcessingResult {
-        original_file_path: original_file_path.to_owned(),
+        original_file_name: file_name.to_string(),
         total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
         merkle_root,

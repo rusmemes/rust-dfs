@@ -1,5 +1,5 @@
 use crate::app::errors::ServerError;
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_store::Store;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::P2pNetworkBehaviour;
 use crate::app::p2p::errors::P2pNetworkError;
@@ -21,25 +21,21 @@ use log::info;
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
-use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 
 const LOG_TARGET: &str = "app::p2p::service";
 
-pub struct P2pService {
+pub struct P2pService<S: Store + Send + Sync + 'static + Clone> {
     config: P2pServiceConfig,
-    file_publish_receiver: Receiver<FileProcessingResult>,
+    store: S,
 }
 
-impl P2pService {
-    pub fn new(
-        config: P2pServiceConfig,
-        file_publish_receiver: Receiver<FileProcessingResult>,
-    ) -> Self {
-        Self {
-            config,
-            file_publish_receiver,
-        }
+impl<S> P2pService<S>
+where
+    S: Store + Send + Sync + 'static + Clone,
+{
+    pub fn new(config: P2pServiceConfig, store: S) -> Self {
+        Self { config, store }
     }
 
     async fn keypair(&self) -> Result<Keypair, P2pNetworkError> {
@@ -127,7 +123,10 @@ fn with_behaviour(
 }
 
 #[async_trait]
-impl Service for P2pService {
+impl<S> Service for P2pService<S>
+where
+    S: Store + Send + Sync + 'static + Clone,
+{
     async fn start(&mut self, cancellation_token: CancellationToken) -> Result<(), ServerError> {
         let mut swarm = self.swarm().await?;
 
@@ -153,7 +152,7 @@ impl Service for P2pService {
 
         loop {
             select! {
-                Some(file_split_result) = self.file_publish_receiver.recv() => file_publish(&mut swarm, file_split_result, &file_owners_topic).await,
+                result = self.store.get_next_file_processing_result() => file_publish(&self.store, &mut swarm, result, &file_owners_topic).await,
                 event = swarm.select_next_some() => handle_swarm_event(&mut swarm, event),
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
