@@ -146,10 +146,11 @@ async fn save(result: FileProcessingResult) -> Result<FileProcessingResult, File
     tokio::task::spawn_blocking(move || save_blocking(result)).await?
 }
 
+pub const METADATA_FILE_NAME: &str = "files.cbor";
+
 fn save_blocking(
     result: FileProcessingResult,
 ) -> Result<FileProcessingResult, FileProcessingError> {
-    const METADATA_FILE_NAME: &str = "files.cbor";
     let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
     let writer = BufWriter::new(file);
     serde_cbor::to_writer(writer, &result)?;

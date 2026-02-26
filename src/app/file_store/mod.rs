@@ -55,9 +55,19 @@ impl TryInto<Vec<u8>> for PublishedFileRecord {
     }
 }
 
+impl TryFrom<Vec<u8>> for PublishedFileRecord {
+    type Error = serde_cbor::Error;
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(&bytes)
+    }
+}
+
 #[async_trait]
 pub trait Store {
-    async fn published_file_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError>;
+    async fn get_published_file(
+        &self,
+        key: PublishedFileKey,
+    ) -> Result<Option<PublishedFileRecord>, FileStoreError>;
     async fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError>;
     async fn persist_file_processing_result(
         &self,

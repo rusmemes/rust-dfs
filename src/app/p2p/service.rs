@@ -160,7 +160,7 @@ where
         loop {
             select! {
                 result = self.store.get_next_file_processing_result() => file_publish(&self.store, &mut swarm, result, &file_owners_topic).await,
-                event = swarm.select_next_some() => handle_swarm_event(&mut swarm, event),
+                event = swarm.select_next_some() => handle_swarm_event(&self.store, &mut swarm, event).await,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break

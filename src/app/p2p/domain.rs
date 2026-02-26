@@ -5,23 +5,15 @@ use libp2p::{dcutr, gossipsub, identify, kad, mdns, ping, relay};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileChunkRequest {
-    pub file_id: String,
+pub struct FileRequest {
+    pub file_id: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileChunkResponse {
-    pub data: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MetadataDownloadRequest {
-    pub file_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MetadataDownloadResponse {
-    pub data: Vec<u8>,
+pub enum FileResponse {
+    Success(Vec<u8>),
+    NotFound,
+    Error(String),
 }
 
 #[derive(NetworkBehaviour)]
@@ -34,6 +26,6 @@ pub struct P2pNetworkBehaviour {
     pub relay_server: relay::Behaviour,
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
-    pub file_download: cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
-    pub metadata_download: cbor::Behaviour<MetadataDownloadRequest, MetadataDownloadResponse>,
+    pub file_download: cbor::Behaviour<FileRequest, FileResponse>,
+    pub metadata_download: cbor::Behaviour<FileRequest, FileResponse>,
 }

@@ -1,7 +1,10 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::{FileProcessingResult, METADATA_FILE_NAME};
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileRecord, Store};
-use crate::app::p2p::domain::{FileChunkRequest, FileChunkResponse, MetadataDownloadRequest, MetadataDownloadResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent};
+use crate::app::p2p::domain::{
+    FileRequest, FileResponse,
+    P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
+};
 use crate::app::p2p::models::PublishedFile;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::{Quorum, Record};
@@ -40,7 +43,9 @@ pub async fn file_publish<S>(
                     {
                         error!("Failed to publish file split record: {}", error);
                         sleep(Duration::from_secs(1)).await
-                    } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(record_key) {
+                    } else if let Err(error) =
+                        swarm.behaviour_mut().kademlia.start_providing(record_key)
+                    {
                         error!("Failed to start providing file split record: {}", error);
                         sleep(Duration::from_secs(1)).await
                     } else {
@@ -95,7 +100,8 @@ where
     }
 }
 
-pub fn handle_swarm_event(
+pub async fn handle_swarm_event<S: Store + Send + Sync + 'static>(
+    store: &S,
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     event: SwarmEvent<P2pNetworkBehaviourEvent>,
 ) {
@@ -111,7 +117,7 @@ pub fn handle_swarm_event(
             RelayClient(event) => log_debug(&event),
             Dcutr(event) => log_debug(&event),
             FileDownload(event) => file_download(swarm, event),
-            MetadataDownload(event) => metadata_download(swarm, event),
+            MetadataDownload(event) => metadata_download(store, swarm, event).await,
             _ => log_debug(&event),
         },
         NewListenAddr {
@@ -122,9 +128,10 @@ pub fn handle_swarm_event(
     }
 }
 
-fn metadata_download(
-    _swarm: &mut Swarm<P2pNetworkBehaviour>,
-    event: request_response::Event<MetadataDownloadRequest, MetadataDownloadResponse>,
+async fn metadata_download<S: Store + Send + Sync + 'static>(
+    store: &S,
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    event: request_response::Event<FileRequest, FileResponse>,
 ) {
     use request_response::Event::*;
     match event {
@@ -138,16 +145,78 @@ fn metadata_download(
                 Request {
                     request_id: _request_id,
                     request,
-                    channel: _channel,
-                } => {
-                    info!(target: LOG_TARGET, "Metadata download request: {:?}", request);
-                }
+                    channel,
+                } => match store.get_published_file(request.file_id.into()).await {
+                    Ok(Some(PublishedFileRecord {
+                        key: _key,
+                        original_file_name: _original_file_name,
+                        target_dir,
+                        public: _public,
+                    })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
+                        Ok(data) => {
+                            if let Err(error) = swarm
+                                .behaviour_mut()
+                                .metadata_download
+                                .send_response(channel, FileResponse::Success(data))
+                            {
+                                error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                            }
+                        }
+                        Err(error) => {
+                            if let Err(error) =
+                                swarm.behaviour_mut().metadata_download.send_response(
+                                    channel,
+                                    FileResponse::Error(error.to_string()),
+                                )
+                            {
+                                error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                            }
+                        }
+                    },
+
+                    Ok(None) => {
+                        if let Err(error) = swarm
+                            .behaviour_mut()
+                            .metadata_download
+                            .send_response(channel, FileResponse::NotFound)
+                        {
+                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                        }
+                    }
+
+                    Err(error) => {
+                        if let Err(error) = swarm.behaviour_mut().metadata_download.send_response(
+                            channel,
+                            FileResponse::Error(error.to_string()),
+                        ) {
+                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                        }
+                    }
+                },
                 Response {
                     request_id: _request_id,
                     response,
-                } => {
-                    info!(target: LOG_TARGET, "Metadata download response: {:?}", response);
-                }
+                } => match response {
+                    FileResponse::Success(data) => {
+                        let result: Result<FileProcessingResult, serde_cbor::Error> =
+                            data.try_into();
+
+                        match result {
+                            Ok(result) => {
+                                info!(target: LOG_TARGET, "File processing successful: {:?}", result);
+                            }
+                            Err(error) => {
+                                error!(target: LOG_TARGET, "Error deserializing response: {:?}", error);
+                            }
+                        }
+                    }
+                    FileResponse::NotFound => {
+                        error!(target: LOG_TARGET, "Metadata download returned 404");
+                    }
+                    FileResponse::Error(error) => {
+                        error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                    }
+                },
             }
         }
         _ => log_debug(&event),
@@ -156,7 +225,7 @@ fn metadata_download(
 
 fn file_download(
     _swarm: &mut Swarm<P2pNetworkBehaviour>,
-    event: request_response::Event<FileChunkRequest, FileChunkResponse>,
+    event: request_response::Event<FileRequest, FileResponse>,
 ) {
     use request_response::Event::*;
     match event {

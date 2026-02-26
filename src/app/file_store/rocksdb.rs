@@ -59,14 +59,23 @@ fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreErr
 
 #[async_trait]
 impl Store for RocksDBStore {
-    async fn published_file_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
+    async fn get_published_file(
+        &self,
+        key: PublishedFileKey,
+    ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
-            Ok(db
-                .get_pinned_cf(get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?, key.0)
-                .map_err(RocksDbStoreError::RocksDb)?
-                .is_some())
+            let option = db
+                .get_cf(get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?, key.0)
+                .map_err(RocksDbStoreError::RocksDb)?;
+
+            if let Some(record) = option {
+                let result: Result<PublishedFileRecord, serde_cbor::Error> = record.try_into();
+                return Ok(result.map(Some).map_err(RocksDbStoreError::CBor)?);
+            }
+
+            Ok(None)
         })
         .await?
     }
