@@ -1,11 +1,11 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::rocksdb::RocksDbStoreError;
+use crate::app::file_store::errors::FileStoreError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use thiserror::Error;
 
 pub mod rocksdb;
+pub mod errors;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PublishedFileRecord {
@@ -36,14 +36,6 @@ impl TryInto<Vec<u8>> for PublishedFileRecord {
     fn try_into(self) -> Result<Vec<u8>, Self::Error> {
         serde_cbor::to_vec(&self)
     }
-}
-
-#[derive(Error, Debug)]
-pub enum FileStoreError {
-    #[error("RocksDB store error: {0}")]
-    RocksDb(#[from] RocksDbStoreError),
-    #[error("Join error: {0}")]
-    JoinError(#[from] tokio::task::JoinError),
 }
 
 #[async_trait]

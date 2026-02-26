@@ -1,4 +1,4 @@
-use crate::app::file_store::FileStoreError;
+use crate::app::file_store::errors::FileStoreError;
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::p2p::errors::P2pNetworkError;
 use thiserror::Error;

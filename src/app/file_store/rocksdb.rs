@@ -1,5 +1,6 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::{FileStoreError, PublishedFileRecord, Store};
+use crate::app::file_store::errors::FileStoreError;
+use crate::app::file_store::{PublishedFileRecord, Store};
 use async_trait::async_trait;
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options};
 use std::path::PathBuf;

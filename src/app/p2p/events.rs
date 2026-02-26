@@ -1,5 +1,6 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::{FileStoreError, PublishedFileRecord, Store};
+use crate::app::file_store::errors::FileStoreError;
+use crate::app::file_store::{PublishedFileRecord, Store};
 use crate::app::p2p::domain::{
     FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
