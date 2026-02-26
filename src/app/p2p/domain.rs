@@ -14,6 +14,16 @@ pub struct FileChunkResponse {
     pub data: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MetadataDownloadRequest {
+    pub file_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MetadataDownloadResponse {
+    pub data: Vec<u8>,
+}
+
 #[derive(NetworkBehaviour)]
 pub struct P2pNetworkBehaviour {
     pub ping: ping::Behaviour,
@@ -25,4 +35,5 @@ pub struct P2pNetworkBehaviour {
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub file_download: cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
+    pub metadata_download: cbor::Behaviour<MetadataDownloadRequest, MetadataDownloadResponse>,
 }

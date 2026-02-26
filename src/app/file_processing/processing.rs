@@ -23,10 +23,10 @@ pub struct FileProcessingResult {
 }
 
 impl FileProcessingResult {
-    pub fn key(&self) -> Vec<u8> {
+    pub fn key(&self) -> [u8; 8] {
         let mut hasher = Sha256Hasher::default();
         self.hash(&mut hasher);
-        hasher.finish().to_be_bytes().to_vec()
+        hasher.finish().to_be_bytes()
     }
 }
 
@@ -79,10 +79,8 @@ pub async fn process_file(
         .ok_or_else(|| FileProcessingError::FileAccess("cannot get file name".to_owned()))?
         .to_string_lossy();
 
-    let pieces_dir = Path::new(containing_dir).join(format!(
-        "{}_chunks",
-        file_name.replace(".", "_")
-    ));
+    let pieces_dir =
+        Path::new(containing_dir).join(format!("{}_chunks", file_name.replace(".", "_")));
 
     tokio::fs::create_dir_all(&pieces_dir).await?;
 

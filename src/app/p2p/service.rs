@@ -119,6 +119,13 @@ fn with_behaviour(
             )],
             request_response::Config::default(),
         ),
+        metadata_download: cbor::Behaviour::new(
+            [(
+                StreamProtocol::new("/dfs/1.0.0/metadata-download"),
+                request_response::ProtocolSupport::Full,
+            )],
+            request_response::Config::default(),
+        ),
     })
 }
 

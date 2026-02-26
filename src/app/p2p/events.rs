@@ -1,9 +1,7 @@
 use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileRecord, Store};
-use crate::app::p2p::domain::{
-    FileChunkRequest, FileChunkResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
-};
+use crate::app::p2p::domain::{FileChunkRequest, FileChunkResponse, MetadataDownloadRequest, MetadataDownloadResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent};
 use crate::app::p2p::models::PublishedFile;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::{Quorum, Record};
@@ -27,14 +25,14 @@ pub async fn file_publish<S>(
 {
     match result {
         Ok(file_processing_result) => loop {
-            let key = file_processing_result.key();
+            let raw_key = file_processing_result.key();
             match serde_cbor::to_vec(&PublishedFile {
                 total_chunks: file_processing_result.total_chunks,
                 merkle_root: file_processing_result.merkle_root,
             }) {
                 Ok(value) => {
-                    let record = Record::new(key, value);
-                    let key = record.key.clone();
+                    let record = Record::new(raw_key.to_vec(), value);
+                    let record_key = record.key.clone();
                     if let Err(error) = swarm
                         .behaviour_mut()
                         .kademlia
@@ -42,13 +40,12 @@ pub async fn file_publish<S>(
                     {
                         error!("Failed to publish file split record: {}", error);
                         sleep(Duration::from_secs(1)).await
-                    } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(key) {
+                    } else if let Err(error) = swarm.behaviour_mut().kademlia.start_providing(record_key) {
                         error!("Failed to start providing file split record: {}", error);
                         sleep(Duration::from_secs(1)).await
                     } else {
-                        let key = file_processing_result.key();
                         add_published_file(store, file_processing_result).await;
-                        delete_file_processing_result(store, key).await;
+                        delete_file_processing_result(store, raw_key).await;
                         info!("Successfully published a file");
                         return;
                     }
@@ -80,7 +77,7 @@ where
     }
 }
 
-async fn delete_file_processing_result<S>(store: &S, file_processing_result_key: Vec<u8>)
+async fn delete_file_processing_result<S>(store: &S, file_processing_result_key: [u8; 8])
 where
     S: Store + Send + Sync + 'static,
 {
@@ -114,12 +111,45 @@ pub fn handle_swarm_event(
             RelayClient(event) => log_debug(&event),
             Dcutr(event) => log_debug(&event),
             FileDownload(event) => file_download(swarm, event),
+            MetadataDownload(event) => metadata_download(swarm, event),
             _ => log_debug(&event),
         },
         NewListenAddr {
             listener_id: _listener_id,
             address,
         } => info!(target: LOG_TARGET, "Listening on {:?}", address),
+        _ => log_debug(&event),
+    }
+}
+
+fn metadata_download(
+    _swarm: &mut Swarm<P2pNetworkBehaviour>,
+    event: request_response::Event<MetadataDownloadRequest, MetadataDownloadResponse>,
+) {
+    use request_response::Event::*;
+    match event {
+        Message {
+            peer: _peer,
+            connection_id: _connection_id,
+            message,
+        } => {
+            use request_response::Message::*;
+            match message {
+                Request {
+                    request_id: _request_id,
+                    request,
+                    channel: _channel,
+                } => {
+                    info!(target: LOG_TARGET, "Metadata download request: {:?}", request);
+                }
+                Response {
+                    request_id: _request_id,
+                    response,
+                } => {
+                    info!(target: LOG_TARGET, "Metadata download response: {:?}", response);
+                }
+            }
+        }
         _ => log_debug(&event),
     }
 }
