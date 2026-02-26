@@ -1,11 +1,12 @@
 syntax = "proto3";
 
-package publish;
+package dfs_grpc;
 
 import "google/protobuf/empty.proto";
 
-service PublishService {
+service Dfs {
     rpc PublishFile (PublishFileRequest) returns (PublishFileResponse);
+    rpc DownloadFile (DownloadFileRequest) returns (DownloadFileResponse);
 }
 
 message PublishFileRequest {
@@ -14,5 +15,13 @@ message PublishFileRequest {
 }
 
 message PublishFileResponse {
+    google.protobuf.Empty ok = 1;
+}
+
+message DownloadFileRequest {
+    uint64 file_id = 1;
+}
+
+message DownloadFileResponse {
     google.protobuf.Empty ok = 1;
 }

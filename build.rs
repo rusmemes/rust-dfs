@@ -5,7 +5,7 @@ fn main() -> Result<()> {
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &["proto/publish.proto"],
+            &["proto/dfs.proto"],
             &["proto"],
         )?;
 

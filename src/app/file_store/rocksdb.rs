@@ -2,7 +2,7 @@ use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
 use async_trait::async_trait;
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ const JOBS_COLUMN_FAMILY_NAME: &str = "jobs";
 
 #[derive(Clone)]
 pub struct RocksDBStore {
-    db: Arc<rocksdb::DB>,
+    db: Arc<DB>,
 }
 
 #[derive(Error, Debug)]
@@ -42,7 +42,7 @@ impl RocksDBStore {
                 ColumnFamilyDescriptor::new(PUBLISHED_FILES_COLUMN_FAMILY_NAME, opts.clone());
             let jobs = ColumnFamilyDescriptor::new(JOBS_COLUMN_FAMILY_NAME, opts.clone());
 
-            let db = rocksdb::DB::open_cf_descriptors(&opts, path, vec![published_files, jobs])
+            let db = DB::open_cf_descriptors(&opts, path, vec![published_files, jobs])
                 .map_err(RocksDbStoreError::RocksDb)?;
 
             Ok::<_, FileStoreError>(RocksDBStore { db: Arc::new(db) })
@@ -51,20 +51,20 @@ impl RocksDBStore {
     }
 }
 
+fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreError> {
+    Ok(db
+        .cf_handle(x)
+        .ok_or_else(|| RocksDbStoreError::CfMissing(x.to_owned()))?)
+}
+
 #[async_trait]
 impl Store for RocksDBStore {
     async fn published_file_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-                .ok_or_else(|| {
-                    RocksDbStoreError::CfMissing(PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_owned())
-                })?;
-
             Ok(db
-                .get_pinned_cf(cf, key.0)
+                .get_pinned_cf(get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?, key.0)
                 .map_err(RocksDbStoreError::RocksDb)?
                 .is_some())
         })
@@ -73,18 +73,17 @@ impl Store for RocksDBStore {
 
     async fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-                .ok_or_else(|| {
-                    RocksDbStoreError::CfMissing(PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_owned())
-                })?;
 
+        tokio::task::spawn_blocking(move || {
             let key = record.key.clone();
             let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
 
-            db.put_cf(cf, key.0, value)
-                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+            db.put_cf(
+                get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?,
+                key.0,
+                value,
+            )
+            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
 
             Ok(())
         })
@@ -96,15 +95,12 @@ impl Store for RocksDBStore {
         record: FileProcessingResult,
     ) -> Result<(), FileStoreError> {
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(JOBS_COLUMN_FAMILY_NAME)
-                .ok_or_else(|| RocksDbStoreError::CfMissing(JOBS_COLUMN_FAMILY_NAME.to_owned()))?;
 
+        tokio::task::spawn_blocking(move || {
             let key = record.key();
             let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
 
-            db.put_cf(cf, key, value)
+            db.put_cf(get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?, key, value)
                 .map_err(|e| RocksDbStoreError::RocksDb(e))?;
 
             Ok(())
@@ -120,11 +116,10 @@ impl Store for RocksDBStore {
 
             let result: Result<Option<FileProcessingResult>, FileStoreError> =
                 tokio::task::spawn_blocking(move || {
-                    let cf = db.cf_handle(JOBS_COLUMN_FAMILY_NAME).ok_or_else(|| {
-                        RocksDbStoreError::CfMissing(JOBS_COLUMN_FAMILY_NAME.to_owned())
-                    })?;
-
-                    match db.iterator_cf(cf, IteratorMode::Start).next() {
+                    match db
+                        .iterator_cf(get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?, IteratorMode::Start)
+                        .next()
+                    {
                         Some(Ok((_, value))) => {
                             let result = value
                                 .to_vec()
@@ -154,13 +149,13 @@ impl Store for RocksDBStore {
         file_processing_result_key: [u8; 8],
     ) -> Result<(), FileStoreError> {
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(JOBS_COLUMN_FAMILY_NAME)
-                .ok_or_else(|| RocksDbStoreError::CfMissing(JOBS_COLUMN_FAMILY_NAME.to_owned()))?;
 
-            db.delete_cf(cf, file_processing_result_key)
-                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+        tokio::task::spawn_blocking(move || {
+            db.delete_cf(
+                get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?,
+                file_processing_result_key,
+            )
+            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
 
             Ok(())
         })

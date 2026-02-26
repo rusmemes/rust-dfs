@@ -1,11 +1,12 @@
 use crate::app::errors::ServerError;
 use crate::app::file_processing::processing::process_file;
 use crate::app::file_store;
+use crate::app::file_store::PublishedFileKey;
+use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
+use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
+use crate::app::grpc::dfs_grpc::PublishFileResponse;
+use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
 use crate::app::grpc::errors::GrpcServerError;
-use crate::app::grpc::publish::publish_service_server::PublishService as Publish;
-use crate::app::grpc::publish::publish_service_server::PublishServiceServer;
-use crate::app::grpc::publish::PublishFileRequest;
-use crate::app::grpc::publish::PublishFileResponse;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use file_store::Store;
@@ -16,12 +17,12 @@ use tonic::{Request, Response, Status};
 
 const LOG_TARGET: &str = "app::grpc::server";
 
-pub struct PublishService<S: Store + Send + Sync + 'static + Clone> {
+pub struct DfsService<S: Store + Send + Sync + 'static + Clone> {
     store: S,
 }
 
 #[tonic::async_trait]
-impl<S> Publish for PublishService<S>
+impl<S> Dfs for DfsService<S>
 where
     S: Store + Send + Sync + 'static + Clone,
 {
@@ -41,6 +42,16 @@ where
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(PublishFileResponse { ok: Some(()) }))
+    }
+
+    async fn download_file(
+        &self,
+        request: Request<DownloadFileRequest>,
+    ) -> Result<Response<DownloadFileResponse>, Status> {
+        let request = request.into_inner();
+        let key: PublishedFileKey = request.file_id.into();
+        // todo
+        Ok(Response::new(DownloadFileResponse { ok: Some(()) }))
     }
 }
 
@@ -72,7 +83,7 @@ where
         info!(target: LOG_TARGET, "Grpc Server is starting at {}", grpc_address);
 
         Server::builder()
-            .add_service(PublishServiceServer::new(PublishService {
+            .add_service(DfsServer::new(DfsService {
                 store: self.store.clone(),
             }))
             .serve_with_shutdown(grpc_address, cancellation_token.cancelled())
