@@ -24,6 +24,12 @@ impl From<PublishedFileKey> for u64 {
     }
 }
 
+impl From<[u8; 8]> for PublishedFileKey {
+    fn from(key: [u8; 8]) -> PublishedFileKey {
+        PublishedFileKey(key)
+    }
+}
+
 impl From<u64> for PublishedFileKey {
     fn from(key: u64) -> PublishedFileKey {
         PublishedFileKey(key.to_be_bytes())
@@ -33,7 +39,7 @@ impl From<u64> for PublishedFileKey {
 impl From<FileProcessingResult> for PublishedFileRecord {
     fn from(result: FileProcessingResult) -> Self {
         Self {
-            key: PublishedFileKey(result.key()),
+            key: result.key().into(),
             original_file_name: result.original_file_name,
             target_dir: result.target_dir,
             public: result.public,

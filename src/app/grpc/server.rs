@@ -36,12 +36,16 @@ where
             .await
             .map_err(|e| Status::internal(format!("failed to split file: {}", e)))?;
 
+        let key: PublishedFileKey = file_split_result.key().into();
+
         self.store
             .persist_file_processing_result(file_split_result)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(PublishFileResponse { ok: Some(()) }))
+        Ok(Response::new(PublishFileResponse {
+            file_id: key.into(),
+        }))
     }
 
     async fn download_file(

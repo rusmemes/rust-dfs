@@ -15,7 +15,7 @@ message PublishFileRequest {
 }
 
 message PublishFileResponse {
-    google.protobuf.Empty ok = 1;
+    uint64 file_id = 1;
 }
 
 message DownloadFileRequest {
