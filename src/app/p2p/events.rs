@@ -1,9 +1,8 @@
 use crate::app::file_processing::processing::{FileProcessingResult, METADATA_FILE_NAME};
 use crate::app::file_store::errors::FileStoreError;
-use crate::app::file_store::{PublishedFileRecord, Store};
+use crate::app::file_store::{FileStore, PublishedFileRecord};
 use crate::app::p2p::domain::{
-    FileRequest, FileResponse,
-    P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
+    FileRequest, FileResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
 use crate::app::p2p::models::PublishedFile;
 use libp2p::gossipsub::IdentTopic;
@@ -18,14 +17,12 @@ use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-pub async fn file_publish<S>(
+pub async fn file_publish<S: FileStore>(
     store: &S,
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     result: Result<FileProcessingResult, FileStoreError>,
     _topic: &IdentTopic,
-) where
-    S: Store + Send + Sync + 'static,
-{
+) {
     match result {
         Ok(file_processing_result) => loop {
             let raw_key = file_processing_result.key();
@@ -68,10 +65,7 @@ pub async fn file_publish<S>(
     }
 }
 
-async fn add_published_file<S>(store: &S, file_processing_result: FileProcessingResult)
-where
-    S: Store + Send + Sync + 'static,
-{
+async fn add_published_file<S: FileStore>(store: &S, file_processing_result: FileProcessingResult) {
     let published_file_record: PublishedFileRecord = file_processing_result.into();
     while let Err(error) = store
         .add_published_file(published_file_record.clone())
@@ -82,10 +76,10 @@ where
     }
 }
 
-async fn delete_file_processing_result<S>(store: &S, file_processing_result_key: [u8; 8])
-where
-    S: Store + Send + Sync + 'static,
-{
+async fn delete_file_processing_result<S: FileStore>(
+    store: &S,
+    file_processing_result_key: [u8; 8],
+) {
     loop {
         match store
             .delete_file_processing_result(file_processing_result_key.clone())
@@ -100,7 +94,7 @@ where
     }
 }
 
-pub async fn handle_swarm_event<S: Store + Send + Sync + 'static>(
+pub async fn handle_swarm_event<S: FileStore>(
     store: &S,
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     event: SwarmEvent<P2pNetworkBehaviourEvent>,
@@ -128,7 +122,7 @@ pub async fn handle_swarm_event<S: Store + Send + Sync + 'static>(
     }
 }
 
-async fn metadata_download<S: Store + Send + Sync + 'static>(
+async fn metadata_download<S: FileStore>(
     store: &S,
     swarm: &mut Swarm<P2pNetworkBehaviour>,
     event: request_response::Event<FileRequest, FileResponse>,
@@ -163,11 +157,10 @@ async fn metadata_download<S: Store + Send + Sync + 'static>(
                             }
                         }
                         Err(error) => {
-                            if let Err(error) =
-                                swarm.behaviour_mut().metadata_download.send_response(
-                                    channel,
-                                    FileResponse::Error(error.to_string()),
-                                )
+                            if let Err(error) = swarm
+                                .behaviour_mut()
+                                .metadata_download
+                                .send_response(channel, FileResponse::Error(error.to_string()))
                             {
                                 error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
                             }
@@ -185,10 +178,11 @@ async fn metadata_download<S: Store + Send + Sync + 'static>(
                     }
 
                     Err(error) => {
-                        if let Err(error) = swarm.behaviour_mut().metadata_download.send_response(
-                            channel,
-                            FileResponse::Error(error.to_string()),
-                        ) {
+                        if let Err(error) = swarm
+                            .behaviour_mut()
+                            .metadata_download
+                            .send_response(channel, FileResponse::Error(error.to_string()))
+                        {
                             error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
                         }
                     }

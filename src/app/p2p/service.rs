@@ -1,5 +1,5 @@
 use crate::app::errors::ServerError;
-use crate::app::file_store::Store;
+use crate::app::file_store::FileStore;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::P2pNetworkBehaviour;
 use crate::app::p2p::errors::P2pNetworkError;
@@ -25,15 +25,12 @@ use tokio_util::sync::CancellationToken;
 
 const LOG_TARGET: &str = "app::p2p::service";
 
-pub struct P2pService<S: Store + Send + Sync + 'static + Clone> {
+pub struct P2pService<S: FileStore> {
     config: P2pServiceConfig,
     store: S,
 }
 
-impl<S> P2pService<S>
-where
-    S: Store + Send + Sync + 'static + Clone,
-{
+impl<S: FileStore> P2pService<S> {
     pub fn new(config: P2pServiceConfig, store: S) -> Self {
         Self { config, store }
     }
@@ -130,10 +127,7 @@ fn with_behaviour(
 }
 
 #[async_trait]
-impl<S> Service for P2pService<S>
-where
-    S: Store + Send + Sync + 'static + Clone,
-{
+impl<S: FileStore> Service for P2pService<S> {
     async fn start(&mut self, cancellation_token: CancellationToken) -> Result<(), ServerError> {
         let mut swarm = self.swarm().await?;
 

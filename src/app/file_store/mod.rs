@@ -62,6 +62,9 @@ impl TryFrom<Vec<u8>> for PublishedFileRecord {
     }
 }
 
+pub trait FileStore: Store + Send + Sync + Clone + 'static {}
+impl<T> FileStore for T where T: Store + Send + Sync + Clone + 'static {}
+
 #[async_trait]
 pub trait Store {
     async fn get_published_file(

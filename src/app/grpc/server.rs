@@ -1,7 +1,6 @@
 use crate::app::errors::ServerError;
 use crate::app::file_processing::processing::process_file;
-use crate::app::file_store;
-use crate::app::file_store::PublishedFileKey;
+use crate::app::file_store::{FileStore, PublishedFileKey};
 use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
 use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::PublishFileResponse;
@@ -9,7 +8,6 @@ use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, Publ
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::server::Service;
 use async_trait::async_trait;
-use file_store::Store;
 use log::info;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -17,14 +15,14 @@ use tonic::{Request, Response, Status};
 
 const LOG_TARGET: &str = "app::grpc::server";
 
-pub struct DfsService<S: Store + Send + Sync + 'static + Clone> {
+pub struct DfsService<S: FileStore> {
     store: S,
 }
 
 #[tonic::async_trait]
 impl<S> Dfs for DfsService<S>
 where
-    S: Store + Send + Sync + 'static + Clone,
+    S: FileStore,
 {
     async fn publish_file(
         &self,
@@ -53,20 +51,20 @@ where
         request: Request<DownloadFileRequest>,
     ) -> Result<Response<DownloadFileResponse>, Status> {
         let request = request.into_inner();
-        let key: PublishedFileKey = request.file_id.into();
+        let _key: PublishedFileKey = request.file_id.into();
         // todo
         Ok(Response::new(DownloadFileResponse { ok: Some(()) }))
     }
 }
 
-pub struct GrpcService<S: Store + Send + Sync + 'static + Clone> {
+pub struct GrpcService<S: FileStore> {
     port: u16,
     store: S,
 }
 
 impl<S> GrpcService<S>
 where
-    S: Store + Send + Sync + 'static + Clone,
+    S: FileStore,
 {
     pub fn new(port: u16, store: S) -> Self {
         Self { port, store }
@@ -76,7 +74,7 @@ where
 #[async_trait]
 impl<S> Service for GrpcService<S>
 where
-    S: Store + Send + Sync + 'static + Clone,
+    S: FileStore,
 {
     async fn start(&mut self, cancellation_token: CancellationToken) -> Result<(), ServerError> {
         let grpc_address = format!("127.0.0.1:{}", self.port)
