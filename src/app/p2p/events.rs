@@ -170,13 +170,13 @@ impl<S: FileStore> EventService<S> {
     }
 
     fn handle_metadata_providers_query_progressed(&mut self, id: QueryId, result: QueryResult) {
-        if let QueryResult::GetProviders(provides_result) = result {
-            self.handle_get_providers_result(&id, provides_result);
+        if let QueryResult::GetProviders(result) = result {
+            self.handle_get_providers_result(&id, result);
         }
     }
 
-    fn handle_get_providers_result(&mut self, id: &QueryId, provides_result: GetProvidersResult) {
-        match provides_result {
+    fn handle_get_providers_result(&mut self, id: &QueryId, result: GetProvidersResult) {
+        match result {
             Ok(providers) => match providers {
                 GetProvidersOk::FoundProviders {
                     key: _key,
