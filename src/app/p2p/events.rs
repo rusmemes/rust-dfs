@@ -5,7 +5,6 @@ use crate::app::p2p::domain::{
     FileRequest, FileResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
 use crate::app::p2p::models::PublishedFile;
-use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::{Quorum, Record};
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
@@ -17,147 +16,175 @@ use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-pub async fn file_publish<S: FileStore>(
-    store: &S,
-    swarm: &mut Swarm<P2pNetworkBehaviour>,
-    result: Result<FileProcessingResult, FileStoreError>,
-    _topic: &IdentTopic,
-) {
-    match result {
-        Ok(file_processing_result) => loop {
-            let raw_key = file_processing_result.key();
-            match serde_cbor::to_vec(&PublishedFile {
-                total_chunks: file_processing_result.total_chunks,
-                merkle_root: file_processing_result.merkle_root,
-            }) {
-                Ok(value) => {
-                    let record = Record::new(raw_key.to_vec(), value);
-                    let record_key = record.key.clone();
-                    if let Err(error) = swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .put_record(record, Quorum::Majority)
-                    {
-                        error!("Failed to publish file split record: {}", error);
+pub struct EventService<S: FileStore> {
+    pub swarm: Swarm<P2pNetworkBehaviour>,
+    store: S,
+}
+
+impl<S: FileStore> EventService<S> {
+    pub fn new(swarm: Swarm<P2pNetworkBehaviour>, store: S) -> Self {
+        Self { swarm, store }
+    }
+
+    pub async fn file_publish(&mut self, result: Result<FileProcessingResult, FileStoreError>) {
+        match result {
+            Ok(file_processing_result) => loop {
+                let raw_key = file_processing_result.key();
+                match serde_cbor::to_vec(&PublishedFile {
+                    total_chunks: file_processing_result.total_chunks,
+                    merkle_root: file_processing_result.merkle_root,
+                }) {
+                    Ok(value) => {
+                        let record = Record::new(raw_key.to_vec(), value);
+                        let record_key = record.key.clone();
+                        if let Err(error) = self
+                            .swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .put_record(record, Quorum::Majority)
+                        {
+                            error!("Failed to publish file split record: {}", error);
+                            sleep(Duration::from_secs(1)).await
+                        } else if let Err(error) = self
+                            .swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .start_providing(record_key)
+                        {
+                            error!("Failed to start providing file split record: {}", error);
+                            sleep(Duration::from_secs(1)).await
+                        } else {
+                            self.add_published_file(file_processing_result).await;
+                            self.delete_file_processing_result(raw_key).await;
+                            info!("Successfully published a file");
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
                         sleep(Duration::from_secs(1)).await
-                    } else if let Err(error) =
-                        swarm.behaviour_mut().kademlia.start_providing(record_key)
-                    {
-                        error!("Failed to start providing file split record: {}", error);
-                        sleep(Duration::from_secs(1)).await
-                    } else {
-                        add_published_file(store, file_processing_result).await;
-                        delete_file_processing_result(store, raw_key).await;
-                        info!("Successfully published a file");
-                        return;
                     }
                 }
-                Err(error) => {
-                    error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
-                    sleep(Duration::from_secs(1)).await
-                }
+            },
+            Err(error) => {
+                error!(target: LOG_TARGET, "File store error: {:?}", error);
+                sleep(Duration::from_secs(1)).await
             }
-        },
-        Err(error) => {
-            error!(target: LOG_TARGET, "File store error: {:?}", error);
+        }
+    }
+
+    async fn add_published_file(&mut self, file_processing_result: FileProcessingResult) {
+        let published_file_record: PublishedFileRecord = file_processing_result.into();
+        while let Err(error) = self
+            .store
+            .add_published_file(published_file_record.clone())
+            .await
+        {
+            error!("Failed to add published file: {}", error);
             sleep(Duration::from_secs(1)).await
         }
     }
-}
 
-async fn add_published_file<S: FileStore>(store: &S, file_processing_result: FileProcessingResult) {
-    let published_file_record: PublishedFileRecord = file_processing_result.into();
-    while let Err(error) = store
-        .add_published_file(published_file_record.clone())
-        .await
-    {
-        error!("Failed to add published file: {}", error);
-        sleep(Duration::from_secs(1)).await
-    }
-}
-
-async fn delete_file_processing_result<S: FileStore>(
-    store: &S,
-    file_processing_result_key: [u8; 8],
-) {
-    loop {
-        match store
-            .delete_file_processing_result(file_processing_result_key.clone())
-            .await
-        {
-            Err(error) => {
-                error!(target: LOG_TARGET, "Error deleting file split record: {}", error);
-                sleep(Duration::from_secs(1)).await
+    async fn delete_file_processing_result(&mut self, file_processing_result_key: [u8; 8]) {
+        loop {
+            match self
+                .store
+                .delete_file_processing_result(file_processing_result_key.clone())
+                .await
+            {
+                Err(error) => {
+                    error!(target: LOG_TARGET, "Error deleting file split record: {}", error);
+                    sleep(Duration::from_secs(1)).await
+                }
+                _ => break,
             }
-            _ => break,
         }
     }
-}
 
-pub async fn handle_swarm_event<S: FileStore>(
-    store: &S,
-    swarm: &mut Swarm<P2pNetworkBehaviour>,
-    event: SwarmEvent<P2pNetworkBehaviourEvent>,
-) {
-    use P2pNetworkBehaviourEvent::*;
-    use SwarmEvent::*;
-    match event {
-        Behaviour(event) => match event {
-            Identify(event) => identify(swarm, event),
-            Mdns(event) => mdns(swarm, event),
-            Kademlia(event) => log_debug(&event),
-            Gossipsub(event) => gossipsub(swarm, event),
-            RelayServer(event) => log_debug(&event),
-            RelayClient(event) => log_debug(&event),
-            Dcutr(event) => log_debug(&event),
-            FileDownload(event) => file_download(swarm, event),
-            MetadataDownload(event) => metadata_download(store, swarm, event).await,
+    pub async fn handle_swarm_event(&mut self, event: SwarmEvent<P2pNetworkBehaviourEvent>) {
+        use P2pNetworkBehaviourEvent::*;
+        use SwarmEvent::*;
+        match event {
+            Behaviour(event) => match event {
+                Identify(event) => self.identify(event),
+                Mdns(event) => self.mdns(event),
+                Kademlia(event) => log_debug(&event),
+                Gossipsub(event) => self.gossipsub(event),
+                RelayServer(event) => log_debug(&event),
+                RelayClient(event) => log_debug(&event),
+                Dcutr(event) => log_debug(&event),
+                FileDownload(event) => self.file_download(event),
+                MetadataDownload(event) => self.metadata_download(event).await,
+                _ => log_debug(&event),
+            },
+            NewListenAddr {
+                listener_id: _listener_id,
+                address,
+            } => info!(target: LOG_TARGET, "Listening on {:?}", address),
             _ => log_debug(&event),
-        },
-        NewListenAddr {
-            listener_id: _listener_id,
-            address,
-        } => info!(target: LOG_TARGET, "Listening on {:?}", address),
-        _ => log_debug(&event),
+        }
     }
-}
 
-async fn metadata_download<S: FileStore>(
-    store: &S,
-    swarm: &mut Swarm<P2pNetworkBehaviour>,
-    event: request_response::Event<FileRequest, FileResponse>,
-) {
-    use request_response::Event::*;
-    match event {
-        Message {
-            peer: _peer,
-            connection_id: _connection_id,
-            message,
-        } => {
-            use request_response::Message::*;
-            match message {
-                Request {
-                    request_id: _request_id,
-                    request,
-                    channel,
-                } => match store.get_published_file(request.file_id.into()).await {
-                    Ok(Some(PublishedFileRecord {
-                        key: _key,
-                        original_file_name: _original_file_name,
-                        target_dir,
-                        public: _public,
-                    })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
-                        Ok(data) => {
-                            if let Err(error) = swarm
+    async fn metadata_download(
+        &mut self,
+        event: request_response::Event<FileRequest, FileResponse>,
+    ) {
+        use request_response::Event::*;
+        match event {
+            Message {
+                peer: _peer,
+                connection_id: _connection_id,
+                message,
+            } => {
+                use request_response::Message::*;
+                match message {
+                    Request {
+                        request_id: _request_id,
+                        request,
+                        channel,
+                    } => match self.store.get_published_file(request.file_id.into()).await {
+                        Ok(Some(PublishedFileRecord {
+                            key: _key,
+                            original_file_name: _original_file_name,
+                            target_dir,
+                            public: _public,
+                        })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
+                            Ok(data) => {
+                                if let Err(error) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .metadata_download
+                                    .send_response(channel, FileResponse::Success(data))
+                                {
+                                    error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                                }
+                            }
+                            Err(error) => {
+                                if let Err(error) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .metadata_download
+                                    .send_response(channel, FileResponse::Error(error.to_string()))
+                                {
+                                    error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                                }
+                            }
+                        },
+
+                        Ok(None) => {
+                            if let Err(error) = self
+                                .swarm
                                 .behaviour_mut()
                                 .metadata_download
-                                .send_response(channel, FileResponse::Success(data))
+                                .send_response(channel, FileResponse::NotFound)
                             {
                                 error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
                             }
                         }
+
                         Err(error) => {
-                            if let Err(error) = swarm
+                            if let Err(error) = self
+                                .swarm
                                 .behaviour_mut()
                                 .metadata_download
                                 .send_response(channel, FileResponse::Error(error.to_string()))
@@ -166,178 +193,161 @@ async fn metadata_download<S: FileStore>(
                             }
                         }
                     },
+                    Response {
+                        request_id: _request_id,
+                        response,
+                    } => match response {
+                        FileResponse::Success(data) => {
+                            let result: Result<FileProcessingResult, serde_cbor::Error> =
+                                data.try_into();
 
-                    Ok(None) => {
-                        if let Err(error) = swarm
-                            .behaviour_mut()
-                            .metadata_download
-                            .send_response(channel, FileResponse::NotFound)
-                        {
-                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                        }
-                    }
-
-                    Err(error) => {
-                        if let Err(error) = swarm
-                            .behaviour_mut()
-                            .metadata_download
-                            .send_response(channel, FileResponse::Error(error.to_string()))
-                        {
-                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                        }
-                    }
-                },
-                Response {
-                    request_id: _request_id,
-                    response,
-                } => match response {
-                    FileResponse::Success(data) => {
-                        let result: Result<FileProcessingResult, serde_cbor::Error> =
-                            data.try_into();
-
-                        match result {
-                            Ok(result) => {
-                                info!(target: LOG_TARGET, "File processing successful: {:?}", result);
-                            }
-                            Err(error) => {
-                                error!(target: LOG_TARGET, "Error deserializing response: {:?}", error);
+                            match result {
+                                Ok(result) => {
+                                    info!(target: LOG_TARGET, "File processing successful: {:?}", result);
+                                }
+                                Err(error) => {
+                                    error!(target: LOG_TARGET, "Error deserializing response: {:?}", error);
+                                }
                             }
                         }
-                    }
-                    FileResponse::NotFound => {
-                        error!(target: LOG_TARGET, "Metadata download returned 404");
-                    }
-                    FileResponse::Error(error) => {
-                        error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                    }
-                },
-            }
-        }
-        _ => log_debug(&event),
-    }
-}
-
-fn file_download(
-    _swarm: &mut Swarm<P2pNetworkBehaviour>,
-    event: request_response::Event<FileRequest, FileResponse>,
-) {
-    use request_response::Event::*;
-    match event {
-        Message {
-            peer: _peer,
-            connection_id: _connection_id,
-            message,
-        } => {
-            use request_response::Message::*;
-            match message {
-                Request {
-                    request_id: _request_id,
-                    request,
-                    channel: _channel,
-                } => {
-                    info!(target: LOG_TARGET, "File download request: {:?}", request);
-                }
-                Response {
-                    request_id: _request_id,
-                    response,
-                } => {
-                    info!(target: LOG_TARGET, "File download response: {:?}", response);
+                        FileResponse::NotFound => {
+                            error!(target: LOG_TARGET, "Metadata download returned 404");
+                        }
+                        FileResponse::Error(error) => {
+                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                        }
+                    },
                 }
             }
+            _ => log_debug(&event),
         }
-        _ => log_debug(&event),
     }
-}
 
-fn gossipsub(_swarm: &mut Swarm<P2pNetworkBehaviour>, event: gossipsub::Event) {
-    use gossipsub::Event::*;
-    match event {
-        Message {
-            propagation_source: _propagation_source,
-            message_id: _message_id,
-            message,
-        } => {
-            info!(target: LOG_TARGET, "[gossipsub] message: {:?}", message);
-        }
-        _ => log_debug(&event),
-    }
-}
-
-fn mdns(swarm: &mut Swarm<P2pNetworkBehaviour>, event: mdns::Event) {
-    use mdns::Event::*;
-
-    match event {
-        Discovered(peers) => {
-            for (peer_id, addr) in peers {
-                info!(target: LOG_TARGET, "[mDNS] Discovered {:?} at {:?}", peer_id, addr);
-
-                if is_dialable(&addr) {
-                    swarm.add_peer_address(peer_id, addr.clone());
+    fn file_download(&mut self, event: request_response::Event<FileRequest, FileResponse>) {
+        use request_response::Event::*;
+        match event {
+            Message {
+                peer: _peer,
+                connection_id: _connection_id,
+                message,
+            } => {
+                use request_response::Message::*;
+                match message {
+                    Request {
+                        request_id: _request_id,
+                        request,
+                        channel: _channel,
+                    } => {
+                        info!(target: LOG_TARGET, "File download request: {:?}", request);
+                    }
+                    Response {
+                        request_id: _request_id,
+                        response,
+                    } => {
+                        info!(target: LOG_TARGET, "File download response: {:?}", response);
+                    }
                 }
-
-                swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, addr.clone());
-
-                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
             }
+            _ => log_debug(&event),
         }
-        _ => log_debug(&event),
     }
-}
 
-fn identify(swarm: &mut Swarm<P2pNetworkBehaviour>, event: identify::Event) {
-    use identify::Event::*;
+    fn gossipsub(&mut self, event: gossipsub::Event) {
+        use gossipsub::Event::*;
+        match event {
+            Message {
+                propagation_source: _propagation_source,
+                message_id: _message_id,
+                message,
+            } => {
+                info!(target: LOG_TARGET, "[gossipsub] message: {:?}", message);
+            }
+            _ => log_debug(&event),
+        }
+    }
 
-    match event {
-        Received {
-            connection_id: _,
-            peer_id,
-            info,
-        } => {
-            let is_relay = info
-                .protocols
-                .iter()
-                .any(|p| *p == relay::HOP_PROTOCOL_NAME);
+    fn mdns(&mut self, event: mdns::Event) {
+        use mdns::Event::*;
 
-            for addr in info.listen_addrs {
-                swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, addr.clone());
+        match event {
+            Discovered(peers) => {
+                for (peer_id, addr) in peers {
+                    info!(target: LOG_TARGET, "[mDNS] Discovered {:?} at {:?}", peer_id, addr);
 
-                if is_dialable(&addr) {
-                    swarm.add_peer_address(peer_id, addr.clone());
+                    if is_dialable(&addr) {
+                        self.swarm.add_peer_address(peer_id, addr.clone());
+                    }
+
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
                 }
+            }
+            _ => log_debug(&event),
+        }
+    }
 
-                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+    fn identify(&mut self, event: identify::Event) {
+        use identify::Event::*;
 
-                if is_relay {
-                    if let Ok(relay_addr) = addr
-                        .clone()
-                        .with_p2p(peer_id)
-                        .map(|a| a.with(Protocol::P2pCircuit))
-                    {
-                        info!(
-                            target: LOG_TARGET,
-                            "Listening via relay {}",
-                            relay_addr
-                        );
+        match event {
+            Received {
+                connection_id: _,
+                peer_id,
+                info,
+            } => {
+                let is_relay = info
+                    .protocols
+                    .iter()
+                    .any(|p| *p == relay::HOP_PROTOCOL_NAME);
 
-                        if let Err(e) = swarm.listen_on(relay_addr.clone()) {
-                            warn!(
+                for addr in info.listen_addrs {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+
+                    if is_dialable(&addr) {
+                        self.swarm.add_peer_address(peer_id, addr.clone());
+                    }
+
+                    self.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
+
+                    if is_relay {
+                        if let Ok(relay_addr) = addr
+                            .clone()
+                            .with_p2p(peer_id)
+                            .map(|a| a.with(Protocol::P2pCircuit))
+                        {
+                            info!(
                                 target: LOG_TARGET,
-                                "Relay listen error on {}: {}",
-                                relay_addr,
-                                e
+                                "Listening via relay {}",
+                                relay_addr
                             );
+
+                            if let Err(e) = self.swarm.listen_on(relay_addr.clone()) {
+                                warn!(
+                                    target: LOG_TARGET,
+                                    "Relay listen error on {}: {}",
+                                    relay_addr,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
             }
+            _ => log_debug(&event),
         }
-        _ => log_debug(&event),
     }
 }
 

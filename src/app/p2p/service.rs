@@ -3,7 +3,7 @@ use crate::app::file_store::FileStore;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::P2pNetworkBehaviour;
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::p2p::events::{file_publish, handle_swarm_event};
+use crate::app::p2p::events::EventService;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
@@ -142,19 +142,20 @@ impl<S: FileStore> Service for P2pService<S> {
 
         swarm.behaviour_mut().kademlia.set_mode(Some(Mode::Server));
 
-        let file_owners_topic = IdentTopic::new("available_files");
         swarm
             .behaviour_mut()
             .gossipsub
-            .subscribe(&file_owners_topic)
+            .subscribe(&IdentTopic::new("available_files"))
             .map_err(|error| {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
+        let mut event_service = EventService::new(swarm, self.store.clone());
+
         loop {
             select! {
-                result = self.store.get_next_file_processing_result() => file_publish(&self.store, &mut swarm, result, &file_owners_topic).await,
-                event = swarm.select_next_some() => handle_swarm_event(&self.store, &mut swarm, event).await,
+                result = self.store.get_next_file_processing_result() => event_service.file_publish(result).await,
+                event = event_service.swarm.select_next_some() => event_service.handle_swarm_event(event).await,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break
