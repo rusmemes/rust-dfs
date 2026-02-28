@@ -1,7 +1,7 @@
 pub mod config;
-pub mod service;
+pub mod domain;
 mod events;
-mod domain;
+pub mod service;
 
 pub mod errors;
 mod models;

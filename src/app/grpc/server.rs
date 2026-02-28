@@ -6,17 +6,20 @@ use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::PublishFileResponse;
 use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
 use crate::app::grpc::errors::GrpcServerError;
+use crate::app::p2p::domain::{FileRequest, P2pCommand};
 use crate::app::server::Service;
 use async_trait::async_trait;
 use log::info;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 const LOG_TARGET: &str = "app::grpc::server";
 
 pub struct DfsService<S: FileStore> {
     store: S,
+    command_sender: mpsc::Sender<P2pCommand>,
 }
 
 #[tonic::async_trait]
@@ -51,8 +54,27 @@ where
         request: Request<DownloadFileRequest>,
     ) -> Result<Response<DownloadFileResponse>, Status> {
         let request = request.into_inner();
-        let _key: PublishedFileKey = request.file_id.into();
-        // todo
+
+        let (tx, rx) = oneshot::channel();
+
+        self.command_sender
+            .send(P2pCommand::RequestMetadata {
+                request: FileRequest {
+                    file_id: request.file_id,
+                },
+                result: tx,
+            })
+            .await
+            .map_err(|_| {
+                Status::new(Code::Internal, "failed to send P2pCommand::RequestMetadata")
+            })?;
+
+        let file_processing_result = rx
+            .await
+            .map_err(|_| Status::new(Code::Internal, "failed to receive response"))?;
+
+        info!(target: LOG_TARGET, "received download file response: {:?}", file_processing_result);
+
         Ok(Response::new(DownloadFileResponse { ok: Some(()) }))
     }
 }
@@ -60,14 +82,19 @@ where
 pub struct GrpcService<S: FileStore> {
     port: u16,
     store: S,
+    command_sender: mpsc::Sender<P2pCommand>,
 }
 
 impl<S> GrpcService<S>
 where
     S: FileStore,
 {
-    pub fn new(port: u16, store: S) -> Self {
-        Self { port, store }
+    pub fn new(port: u16, store: S, command_sender: mpsc::Sender<P2pCommand>) -> Self {
+        Self {
+            port,
+            store,
+            command_sender,
+        }
     }
 }
 
@@ -87,6 +114,7 @@ where
         Server::builder()
             .add_service(DfsServer::new(DfsService {
                 store: self.store.clone(),
+                command_sender: self.command_sender.clone(),
             }))
             .serve_with_shutdown(grpc_address, cancellation_token.cancelled())
             .await

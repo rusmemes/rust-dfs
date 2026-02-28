@@ -1,7 +1,7 @@
 use crate::app::errors::ServerError;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::config::P2pServiceConfig;
-use crate::app::p2p::domain::P2pNetworkBehaviour;
+use crate::app::p2p::domain::{P2pCommand, P2pNetworkBehaviour};
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::events::EventService;
 use crate::app::server::Service;
@@ -18,9 +18,11 @@ use libp2p::{
     yamux, StreamProtocol, Swarm,
 };
 use log::info;
+use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const LOG_TARGET: &str = "app::p2p::service";
@@ -28,11 +30,20 @@ const LOG_TARGET: &str = "app::p2p::service";
 pub struct P2pService<S: FileStore> {
     config: P2pServiceConfig,
     store: S,
+    pub commands_rx: mpsc::Receiver<P2pCommand>,
 }
 
 impl<S: FileStore> P2pService<S> {
-    pub fn new(config: P2pServiceConfig, store: S) -> Self {
-        Self { config, store }
+    pub fn new(
+        config: P2pServiceConfig,
+        store: S,
+        commands_rx: mpsc::Receiver<P2pCommand>,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            commands_rx,
+        }
     }
 
     async fn keypair(&self) -> Result<Keypair, P2pNetworkError> {
@@ -150,7 +161,12 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService::new(swarm, self.store.clone());
+        let mut event_service = EventService {
+            swarm,
+            store: self.store.clone(),
+            metadata_providers_requests: HashMap::new(),
+            metadata_download_requests: HashMap::new(),
+        };
 
         loop {
             select! {
@@ -160,6 +176,11 @@ impl<S: FileStore> Service for P2pService<S> {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break
                 },
+                command = self.commands_rx.recv() => {
+                    if let Some(command) = command {
+                        event_service.handle_command(command).await
+                    }
+                }
             }
         }
 

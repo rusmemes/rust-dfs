@@ -16,7 +16,7 @@ pub struct PublishedFileRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PublishedFileKey([u8; 8]);
+pub struct PublishedFileKey(pub [u8; 8]);
 
 impl From<PublishedFileKey> for u64 {
     fn from(key: PublishedFileKey) -> u64 {

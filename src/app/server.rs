@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use log::{error, info};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -34,18 +34,21 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-
         let store = RocksDBStore::new(PathBuf::from("./.file_store")).await?;
+
+        // p2p commands channel
+        let (tx, rx) = mpsc::channel(1);
 
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file("./keys.keypair")
                 .build(),
-            store.clone()
+            store.clone(),
+            rx,
         );
         self.spawn_task(p2p_service).await?;
 
-        let grpc_service = GrpcService::new(9999, store);
+        let grpc_service = GrpcService::new(9999, store, tx);
         self.spawn_task(grpc_service).await?;
 
         Ok(())

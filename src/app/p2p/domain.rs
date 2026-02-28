@@ -1,8 +1,10 @@
+use crate::app::file_processing::processing::FileProcessingResult;
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response::cbor;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{dcutr, gossipsub, identify, kad, mdns, ping, relay};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileRequest {
@@ -14,6 +16,13 @@ pub enum FileResponse {
     Success(Vec<u8>),
     NotFound,
     Error(String),
+}
+
+pub enum P2pCommand {
+    RequestMetadata {
+        request: FileRequest,
+        result: oneshot::Sender<Option<FileProcessingResult>>,
+    },
 }
 
 #[derive(NetworkBehaviour)]

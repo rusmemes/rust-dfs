@@ -1,29 +1,49 @@
 use crate::app::file_processing::processing::{FileProcessingResult, METADATA_FILE_NAME};
 use crate::app::file_store::errors::FileStoreError;
-use crate::app::file_store::{FileStore, PublishedFileRecord};
+use crate::app::file_store::{FileStore, PublishedFileKey, PublishedFileRecord};
 use crate::app::p2p::domain::{
-    FileRequest, FileResponse, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
+    FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
 use crate::app::p2p::models::PublishedFile;
-use libp2p::kad::{Quorum, Record};
+use libp2p::kad::{GetProvidersOk, QueryId, QueryResult, Quorum, Record, RecordKey};
 use libp2p::multiaddr::Protocol;
+use libp2p::request_response::OutboundRequestId;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{gossipsub, identify, mdns, relay, request_response, Swarm};
+use libp2p::{gossipsub, identify, kad, mdns, relay, request_response, Swarm};
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
+pub struct MetadataProvidersRequestData {
+    request: FileRequest,
+    result: oneshot::Sender<Option<FileProcessingResult>>,
+}
+
+// possible a memory leak for maps caching queries and requests data
 pub struct EventService<S: FileStore> {
     pub swarm: Swarm<P2pNetworkBehaviour>,
-    store: S,
+    pub store: S,
+    pub metadata_providers_requests: HashMap<QueryId, MetadataProvidersRequestData>,
+    pub metadata_download_requests:
+        HashMap<OutboundRequestId, oneshot::Sender<Option<FileProcessingResult>>>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(swarm: Swarm<P2pNetworkBehaviour>, store: S) -> Self {
-        Self { swarm, store }
+    pub async fn handle_command(&mut self, command: P2pCommand) {
+        match command {
+            P2pCommand::RequestMetadata { request, result } => {
+                let key: PublishedFileKey = request.file_id.into();
+                let key = RecordKey::new(&key.0);
+                let query_id = self.swarm.behaviour_mut().kademlia.get_providers(key);
+                self.metadata_providers_requests
+                    .insert(query_id, MetadataProvidersRequestData { request, result });
+            }
+        }
     }
 
     pub async fn file_publish(&mut self, result: Result<FileProcessingResult, FileStoreError>) {
@@ -108,7 +128,7 @@ impl<S: FileStore> EventService<S> {
             Behaviour(event) => match event {
                 Identify(event) => self.identify(event),
                 Mdns(event) => self.mdns(event),
-                Kademlia(event) => log_debug(&event),
+                Kademlia(event) => self.kademlia(event),
                 Gossipsub(event) => self.gossipsub(event),
                 RelayServer(event) => log_debug(&event),
                 RelayClient(event) => log_debug(&event),
@@ -122,6 +142,67 @@ impl<S: FileStore> EventService<S> {
                 address,
             } => info!(target: LOG_TARGET, "Listening on {:?}", address),
             _ => log_debug(&event),
+        }
+    }
+
+    fn kademlia(&mut self, event: kad::Event) {
+        use kad::Event::*;
+        match event {
+            OutboundQueryProgressed {
+                id,
+                result,
+                stats: _stats,
+                step: _step,
+            } => {
+                let option = self.metadata_providers_requests.remove(&id);
+                if let Some(data) = option {
+                    self.handle_metadata_providers_query_progressed(result, data);
+                }
+            }
+            _ => log_debug(&event),
+        }
+    }
+
+    fn handle_metadata_providers_query_progressed(
+        &mut self,
+        result: QueryResult,
+        data: MetadataProvidersRequestData,
+    ) {
+        if let QueryResult::GetProviders(provides_result) = result {
+            match provides_result {
+                Ok(providers) => {
+                    if let GetProvidersOk::FoundProviders {
+                        key: _key,
+                        providers,
+                    } = providers
+                    {
+                        if let Some(peer) = providers.iter().next() {
+                            let request_id = self
+                                .swarm
+                                .behaviour_mut()
+                                .metadata_download
+                                .send_request(peer, data.request);
+
+                            self.metadata_download_requests
+                                .insert(request_id, data.result);
+                            return;
+                        } else {
+                            error!(target: LOG_TARGET, "No providers found");
+                        }
+                    } else {
+                        warn!(target: LOG_TARGET, "Providers not found!");
+                    }
+                }
+                Err(error) => {
+                    error!(target: LOG_TARGET, "Error getting providers: {:?}", error);
+                }
+            }
+        } else {
+            warn!(target: LOG_TARGET, "No providers found: {:?}", result);
+        }
+
+        if let Err(result) = data.result.send(None) {
+            error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
         }
     }
 
@@ -194,32 +275,49 @@ impl<S: FileStore> EventService<S> {
                         }
                     },
                     Response {
-                        request_id: _request_id,
+                        request_id,
                         response,
-                    } => match response {
-                        FileResponse::Success(data) => {
-                            let result: Result<FileProcessingResult, serde_cbor::Error> =
-                                data.try_into();
-
-                            match result {
-                                Ok(result) => {
-                                    info!(target: LOG_TARGET, "File processing successful: {:?}", result);
-                                }
-                                Err(error) => {
-                                    error!(target: LOG_TARGET, "Error deserializing response: {:?}", error);
-                                }
-                            }
+                    } => {
+                        if let Some(channel) = self.metadata_download_requests.remove(&request_id) {
+                            self.handle_metadata_download_response(response, channel);
                         }
-                        FileResponse::NotFound => {
-                            error!(target: LOG_TARGET, "Metadata download returned 404");
-                        }
-                        FileResponse::Error(error) => {
-                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                        }
-                    },
+                    }
                 }
             }
             _ => log_debug(&event),
+        }
+    }
+
+    fn handle_metadata_download_response(
+        &mut self,
+        response: FileResponse,
+        channel: oneshot::Sender<Option<FileProcessingResult>>,
+    ) {
+        match response {
+            FileResponse::Success(data) => {
+                let result: Result<FileProcessingResult, serde_cbor::Error> = data.try_into();
+
+                match result {
+                    Ok(result) => {
+                        if let Err(error) = channel.send(Some(result)) {
+                            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        error!(target: LOG_TARGET, "Error deserializing response: {:?}", error);
+                    }
+                }
+            }
+            FileResponse::NotFound => {
+                error!(target: LOG_TARGET, "Metadata download returned 404");
+            }
+            FileResponse::Error(error) => {
+                error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+            }
+        }
+        if let Err(error) = channel.send(None) {
+            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
         }
     }
 
