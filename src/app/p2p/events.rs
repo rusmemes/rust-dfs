@@ -171,11 +171,11 @@ impl<S: FileStore> EventService<S> {
 
     fn handle_metadata_providers_query_progressed(&mut self, id: QueryId, result: QueryResult) {
         if let QueryResult::GetProviders(result) = result {
-            self.handle_get_providers_result(&id, result);
+            self.handle_get_metadata_providers_result(&id, result);
         }
     }
 
-    fn handle_get_providers_result(&mut self, id: &QueryId, result: GetProvidersResult) {
+    fn handle_get_metadata_providers_result(&mut self, id: &QueryId, result: GetProvidersResult) {
         match result {
             Ok(providers) => match providers {
                 GetProvidersOk::FoundProviders {
@@ -187,27 +187,29 @@ impl<S: FileStore> EventService<S> {
                     }
                 }
                 GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => {
-                    if let Some(data) = self.metadata_providers_requests.remove(&id) {
-                        if let Some(peer) = data.found_providers.iter().next() {
-                            let request_id = self
-                                .swarm
-                                .behaviour_mut()
-                                .metadata_download
-                                .send_request(peer, data.request);
-
-                            self.metadata_download_requests
-                                .insert(request_id, data.result);
-                        }
-                    }
+                    self.handle_all_possible_metadata_providers_found(&id);
                 }
             },
             Err(error) => {
                 error!(target: LOG_TARGET, "Error getting providers: {:?}", error);
-                if let Some(data) = self.metadata_providers_requests.remove(&id) {
-                    if let Err(result) = data.result.send(None) {
-                        error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
-                    }
-                }
+                self.handle_all_possible_metadata_providers_found(&id);
+            }
+        }
+    }
+
+    fn handle_all_possible_metadata_providers_found(&mut self, id: &QueryId) {
+        if let Some(data) = self.metadata_providers_requests.remove(&id) {
+            if let Some(peer) = data.found_providers.iter().next() {
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .metadata_download
+                    .send_request(peer, data.request);
+
+                self.metadata_download_requests
+                    .insert(request_id, data.result);
+            } else if let Err(result) = data.result.send(None) {
+                error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
             }
         }
     }
