@@ -9,7 +9,7 @@ use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
 use libp2p::multiaddr::Protocol;
-use libp2p::request_response::OutboundRequestId;
+use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, identify, kad, mdns, relay, request_response, PeerId, Swarm};
 use log::{debug, error, info, warn};
@@ -238,49 +238,22 @@ impl<S: FileStore> EventService<S> {
                             target_dir,
                             public: _public,
                         })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
-                            Ok(data) => {
-                                if let Err(error) = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .metadata_download
-                                    .send_response(channel, FileResponse::Success(data))
-                                {
-                                    error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                                }
-                            }
-                            Err(error) => {
-                                if let Err(error) = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .metadata_download
-                                    .send_response(channel, FileResponse::Error(error.to_string()))
-                                {
-                                    error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                                }
-                            }
+                            Ok(data) => self.send_metadata_download_response(
+                                channel,
+                                FileResponse::Success(data),
+                            ),
+                            Err(error) => self.send_metadata_download_response(
+                                channel,
+                                FileResponse::Error(error.to_string()),
+                            ),
                         },
-
                         Ok(None) => {
-                            if let Err(error) = self
-                                .swarm
-                                .behaviour_mut()
-                                .metadata_download
-                                .send_response(channel, FileResponse::NotFound)
-                            {
-                                error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                            }
+                            self.send_metadata_download_response(channel, FileResponse::NotFound)
                         }
-
-                        Err(error) => {
-                            if let Err(error) = self
-                                .swarm
-                                .behaviour_mut()
-                                .metadata_download
-                                .send_response(channel, FileResponse::Error(error.to_string()))
-                            {
-                                error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
-                            }
-                        }
+                        Err(error) => self.send_metadata_download_response(
+                            channel,
+                            FileResponse::Error(error.to_string()),
+                        ),
                     },
                     Response {
                         request_id,
@@ -293,6 +266,21 @@ impl<S: FileStore> EventService<S> {
                 }
             }
             _ => log_debug(&event),
+        }
+    }
+
+    fn send_metadata_download_response(
+        &mut self,
+        channel: ResponseChannel<FileResponse>,
+        file_response: FileResponse,
+    ) {
+        if let Err(error) = self
+            .swarm
+            .behaviour_mut()
+            .metadata_download
+            .send_response(channel, file_response)
+        {
+            error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
         }
     }
 
