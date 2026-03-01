@@ -1,3 +1,4 @@
+use crate::app::cli::Cli;
 use crate::app::errors::ServerError;
 use crate::app::file_store::rocksdb::RocksDBStore;
 use crate::app::grpc::server::GrpcService;
@@ -16,6 +17,7 @@ const LOG_TARGET: &str = "app::server";
 pub type ServerResult<T> = Result<T, ServerError>;
 
 pub struct Server {
+    cli: Cli,
     cancellation_token: CancellationToken,
     subtasks: Arc<Mutex<Vec<JoinHandle<Result<(), ServerError>>>>>,
 }
@@ -26,22 +28,25 @@ pub trait Service: Send + Sync + 'static {
 }
 
 impl Server {
-    pub fn new(cancellation_token: CancellationToken) -> Self {
+    pub fn new(cli: Cli, cancellation_token: CancellationToken) -> Self {
         Self {
+            cli,
             cancellation_token,
             subtasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let store = RocksDBStore::new(PathBuf::from("./.file_store")).await?;
+        init_base_dir(&self.cli.base_path).await?;
+
+        let store = RocksDBStore::new(self.cli.base_path.join("file_store")).await?;
 
         // p2p commands channel
         let (tx, rx) = mpsc::channel(1);
 
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
-                .with_keypair_file("./keys.keypair")
+                .with_keypair_file(self.cli.base_path.join("key.keypair"))
                 .build(),
             store.clone(),
             rx,
@@ -88,4 +93,20 @@ impl Server {
         }
         Ok(())
     }
+}
+
+async fn init_base_dir(base_dir: &PathBuf) -> ServerResult<()> {
+    if tokio::fs::try_exists(base_dir).await? {
+        let result = tokio::fs::metadata(base_dir).await?;
+        if !result.is_dir() {
+            Err(ServerError::Custom(format!(
+                "{} is not a directory",
+                base_dir.display()
+            )))?;
+        }
+    } else {
+        tokio::fs::create_dir_all(base_dir).await?;
+    }
+
+    Ok(())
 }

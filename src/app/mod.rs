@@ -6,3 +6,4 @@ mod errors;
 mod file_processing;
 pub mod file_store;
 pub mod grpc;
+pub mod cli;

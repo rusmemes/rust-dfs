@@ -14,4 +14,8 @@ pub enum ServerError {
     GrpcServer(#[from] GrpcServerError),
     #[error("File store error: {0}")]
     FileStore(#[from] FileStoreError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Error: {0}")]
+    Custom(String),
 }

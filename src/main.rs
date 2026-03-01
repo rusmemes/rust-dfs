@@ -1,4 +1,6 @@
+use crate::app::cli::{Cli, Command};
 use crate::app::server::Server;
+use clap::Parser;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
@@ -8,9 +10,19 @@ mod app;
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Start => start(cli).await?,
+    }
+
+    Ok(())
+}
+
+async fn start(cli: Cli) -> anyhow::Result<()> {
     let cancellation_token = CancellationToken::new();
 
-    let server = Server::new(cancellation_token.clone());
+    let server = Server::new(cli, cancellation_token.clone());
 
     server.start().await?;
 
@@ -20,6 +32,5 @@ async fn main() -> anyhow::Result<()> {
     }
 
     server.stop().await?;
-
     Ok(())
 }
