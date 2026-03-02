@@ -1,7 +1,7 @@
 use crate::app::file_processing::processing::FileProcessingResult;
 use crate::app::file_store::domain::PendingDownload;
 use crate::app::file_store::errors::FileStoreError;
-use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
+use crate::app::file_store::{Persistable, PublishedFileKey, PublishedFileRecord, Store};
 use async_trait::async_trait;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use std::path::PathBuf;
@@ -56,6 +56,25 @@ impl RocksDBStore {
             .map_err(RocksDbStoreError::RocksDb)?;
 
             Ok::<_, FileStoreError>(RocksDBStore { db: Arc::new(db) })
+        })
+        .await?
+    }
+
+    async fn put<R: Persistable + Send + 'static>(
+        &self,
+        record: R,
+        cf: &'static str,
+    ) -> Result<(), FileStoreError> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let key = record.key();
+            let value: Vec<u8> = record.value().map_err(|e| RocksDbStoreError::CBor(e))?;
+
+            db.put_cf(get_cf(&db, cf)?, key.0, value)
+                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+
+            Ok(())
         })
         .await?
     }
@@ -130,59 +149,18 @@ impl Store for RocksDBStore {
     }
 
     async fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let key = record.key.clone();
-            let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
-
-            db.put_cf(
-                get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?,
-                key.0,
-                value,
-            )
-            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
-
-            Ok(())
-        })
-        .await?
+        self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
     async fn add_pending_download(&self, record: PendingDownload) -> Result<(), FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let key = record.key.clone();
-            let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
-
-            db.put_cf(
-                get_cf(&db, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)?,
-                key.0,
-                value,
-            )
-            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
-
-            Ok(())
-        })
-        .await?
+        self.put(record, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 
     async fn persist_file_processing_result(
         &self,
         record: FileProcessingResult,
     ) -> Result<(), FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let key = record.key();
-            let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
-
-            db.put_cf(get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?, key, value)
-                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
-
-            Ok(())
-        })
-        .await?
+        self.put(record, JOBS_COLUMN_FAMILY_NAME).await
     }
 
     async fn get_next_file_processing_result(

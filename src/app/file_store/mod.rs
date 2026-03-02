@@ -11,6 +11,11 @@ pub mod rocksdb;
 pub trait FileStore: Store + Send + Sync + Clone + 'static {}
 impl<T> FileStore for T where T: Store + Send + Sync + Clone + 'static {}
 
+pub trait Persistable {
+    fn key(&self) -> PublishedFileKey;
+    fn value(&self) -> Result<Vec<u8>, serde_cbor::Error>;
+}
+
 #[async_trait]
 pub trait Store {
     fn stream_published_files(&self)

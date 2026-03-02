@@ -1,4 +1,6 @@
 use crate::app::file_processing::errors::FileProcessingError;
+use crate::app::file_store::domain::PublishedFileKey;
+use crate::app::file_store::Persistable;
 use crate::app::utils::save_metadata;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleTree};
@@ -20,6 +22,16 @@ pub struct FileProcessingResult {
     pub merkle_proofs: Vec<Vec<u8>>,
     pub chunk_file_extension: String,
     pub public: bool,
+}
+
+impl Persistable for FileProcessingResult {
+    fn key(&self) -> PublishedFileKey {
+        PublishedFileKey(self.key())
+    }
+
+    fn value(&self) -> Result<Vec<u8>, serde_cbor::Error> {
+        serde_cbor::to_vec(self)
+    }
 }
 
 impl FileProcessingResult {
