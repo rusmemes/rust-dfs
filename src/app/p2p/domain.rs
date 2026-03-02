@@ -38,3 +38,9 @@ pub struct P2pNetworkBehaviour {
     pub file_download: cbor::Behaviour<FileRequest, FileResponse>,
     pub metadata_download: cbor::Behaviour<FileRequest, FileResponse>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublishedFile {
+    pub total_chunks: usize,
+    pub merkle_root: [u8; 32],
+}

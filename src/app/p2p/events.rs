@@ -1,11 +1,8 @@
 use crate::app::file_processing::processing::{FileProcessingResult, METADATA_FILE_NAME};
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{FileStore, PublishedFileKey, PublishedFileRecord};
-use crate::app::p2p::domain::{
-    FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
-};
+use crate::app::p2p::domain::{FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent, PublishedFile};
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::p2p::models::PublishedFile;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
