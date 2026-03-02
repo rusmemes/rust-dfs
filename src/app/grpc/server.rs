@@ -1,6 +1,7 @@
 use crate::app::errors::ServerError;
-use crate::app::file_processing::processing::process_file;
-use crate::app::file_store::{FileStore, PublishedFileKey};
+use crate::app::file_processing::processing::{process_file, FileProcessingResult};
+use crate::app::file_store::domain::{PendingDownload, PublishedFileKey};
+use crate::app::file_store::FileStore;
 use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
 use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::PublishFileResponse;
@@ -8,8 +9,10 @@ use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, Publ
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::p2p::domain::{FileRequest, P2pCommand};
 use crate::app::server::Service;
+use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
 use log::info;
+use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -55,6 +58,12 @@ where
     ) -> Result<Response<DownloadFileResponse>, Status> {
         let request = request.into_inner();
 
+        let download_path = PathBuf::from(request.download_path);
+
+        ensure_dir_exists_or_create(&download_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         let (tx, rx) = oneshot::channel();
 
         self.command_sender
@@ -73,7 +82,42 @@ where
             .await
             .map_err(|_| Status::new(Code::Internal, "failed to receive response"))?;
 
-        info!(target: LOG_TARGET, "received download file response: {:?}", file_processing_result);
+        let file_processing_result =
+            file_processing_result.ok_or_else(|| Status::new(Code::Internal, "missing file"))?;
+
+        let file_path = download_path.join(&file_processing_result.original_file_name);
+        if tokio::fs::try_exists(&file_path).await? {
+            return Err(Status::already_exists(file_path.to_string_lossy()));
+        }
+
+        let pieces_dir = download_path.join(format!(
+            "{}_chunks",
+            file_processing_result.original_file_name.replace(".", "_")
+        ));
+
+        ensure_dir_exists_or_create(&pieces_dir)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let file_processing_result = FileProcessingResult {
+            target_dir: pieces_dir,
+            ..file_processing_result
+        };
+
+        let pending_download = PendingDownload {
+            key: file_processing_result.key().into(),
+            original_file_name: file_processing_result.original_file_name.clone(),
+            download_path: file_processing_result.target_dir.clone(),
+        };
+
+        save_metadata(file_processing_result)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        self.store
+            .add_pending_download(pending_download)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(DownloadFileResponse { ok: Some(()) }))
     }

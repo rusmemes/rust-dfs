@@ -1,4 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_store::domain::PendingDownload;
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
+const PENDING_DOWNLOADS_COLUMN_FAMILY_NAME: &str = "pending_downloads";
 const JOBS_COLUMN_FAMILY_NAME: &str = "jobs";
 
 #[derive(Clone)]
@@ -43,9 +45,15 @@ impl RocksDBStore {
             let published_files =
                 ColumnFamilyDescriptor::new(PUBLISHED_FILES_COLUMN_FAMILY_NAME, opts.clone());
             let jobs = ColumnFamilyDescriptor::new(JOBS_COLUMN_FAMILY_NAME, opts.clone());
+            let pending_downloads =
+                ColumnFamilyDescriptor::new(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME, opts.clone());
 
-            let db = DB::open_cf_descriptors(&opts, path, vec![published_files, jobs])
-                .map_err(RocksDbStoreError::RocksDb)?;
+            let db = DB::open_cf_descriptors(
+                &opts,
+                path,
+                vec![published_files, jobs, pending_downloads],
+            )
+            .map_err(RocksDbStoreError::RocksDb)?;
 
             Ok::<_, FileStoreError>(RocksDBStore { db: Arc::new(db) })
         })
@@ -130,6 +138,25 @@ impl Store for RocksDBStore {
 
             db.put_cf(
                 get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?,
+                key.0,
+                value,
+            )
+            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn add_pending_download(&self, record: PendingDownload) -> Result<(), FileStoreError> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let key = record.key.clone();
+            let value: Vec<u8> = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
+
+            db.put_cf(
+                get_cf(&db, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)?,
                 key.0,
                 value,
             )

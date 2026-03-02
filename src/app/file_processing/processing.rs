@@ -1,10 +1,10 @@
 use crate::app::file_processing::errors::FileProcessingError;
+use crate::app::utils::save_metadata;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleTree};
 use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -104,7 +104,7 @@ pub async fn process_file(
         public,
     };
 
-    Ok(save(file_split_result).await?)
+    Ok(save_metadata(file_split_result).await?)
 }
 
 async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FileProcessingError> {
@@ -140,19 +140,4 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
     }
 
     Ok(merkle_tree_leaves)
-}
-
-async fn save(result: FileProcessingResult) -> Result<FileProcessingResult, FileProcessingError> {
-    tokio::task::spawn_blocking(move || save_blocking(result)).await?
-}
-
-pub const METADATA_FILE_NAME: &str = "files.cbor";
-
-fn save_blocking(
-    result: FileProcessingResult,
-) -> Result<FileProcessingResult, FileProcessingError> {
-    let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
-    let writer = BufWriter::new(file);
-    serde_cbor::to_writer(writer, &result)?;
-    Ok(result)
 }

@@ -20,6 +20,7 @@ message PublishFileResponse {
 
 message DownloadFileRequest {
     uint64 file_id = 1;
+    string download_path = 2;
 }
 
 message DownloadFileResponse {
