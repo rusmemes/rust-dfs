@@ -3,6 +3,7 @@ use crate::app::file_store::errors::FileStoreError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 
 pub mod errors;
 pub mod rocksdb;
@@ -67,6 +68,7 @@ impl<T> FileStore for T where T: Store + Send + Sync + Clone + 'static {}
 
 #[async_trait]
 pub trait Store {
+    fn stream_published_files(&self) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>>;
     async fn get_published_file(
         &self,
         key: PublishedFileKey,

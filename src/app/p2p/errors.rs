@@ -1,6 +1,7 @@
+use crate::app::file_store::errors::FileStoreError;
 use libp2p::gossipsub::SubscriptionError;
 use libp2p::identity::DecodingError;
-use libp2p::{noise, TransportError};
+use libp2p::{kad, noise, TransportError};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -22,4 +23,10 @@ pub enum P2pNetworkError {
     Libp2pTransport(#[from] TransportError<std::io::Error>),
     #[error("Libp2p gossipsub subscription error: {0}")]
     Libp2pGossipsubSubscription(#[from] SubscriptionError),
+    #[error("CBor error: {0}")]
+    CBor(#[from] serde_cbor::Error),
+    #[error("Kademlia error: {0}")]
+    Kademlia(#[from] kad::store::Error),
+    #[error("File store error: {0}")]
+    FileStorage(#[from] FileStoreError),
 }

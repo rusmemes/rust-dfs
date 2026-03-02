@@ -53,7 +53,7 @@ impl Server {
         );
         self.spawn_task(p2p_service).await?;
 
-        let grpc_service = GrpcService::new(9999, store, tx);
+        let grpc_service = GrpcService::new(self.cli.grpc_port, store, tx);
         self.spawn_task(grpc_service).await?;
 
         Ok(())

@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
 const JOBS_COLUMN_FAMILY_NAME: &str = "jobs";
@@ -59,6 +61,45 @@ fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreErr
 
 #[async_trait]
 impl Store for RocksDBStore {
+    fn stream_published_files(
+        &self,
+    ) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>> {
+        let db = self.db.clone();
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::task::spawn_blocking(move || {
+            let cf = match get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME) {
+                Ok(cf) => cf,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            };
+
+            let iterator = db.iterator_cf(cf, IteratorMode::Start);
+
+            for item in iterator {
+                if tx.is_closed() {
+                    break;
+                }
+
+                let result = match item {
+                    Ok((_, value)) => value
+                        .to_vec()
+                        .try_into()
+                        .map_err(|e| RocksDbStoreError::CBor(e).into()),
+                    Err(e) => Err(RocksDbStoreError::RocksDb(e).into()),
+                };
+
+                if tx.blocking_send(result).is_err() {
+                    break;
+                }
+            }
+        });
+
+        ReceiverStream::new(rx)
+    }
+
     async fn get_published_file(
         &self,
         key: PublishedFileKey,

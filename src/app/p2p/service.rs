@@ -167,6 +167,8 @@ impl<S: FileStore> Service for P2pService<S> {
             metadata_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
         };
+        
+        event_service.provide_all_published_files().await?;
 
         loop {
             select! {

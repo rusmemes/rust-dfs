@@ -4,7 +4,9 @@ use crate::app::file_store::{FileStore, PublishedFileKey, PublishedFileRecord};
 use crate::app::p2p::domain::{
     FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
 };
+use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::models::PublishedFile;
+use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
@@ -55,49 +57,65 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
+    async fn provide(
+        &mut self,
+        file_processing_result: &FileProcessingResult,
+    ) -> Result<(), P2pNetworkError> {
+        let raw_key = file_processing_result.key();
+
+        let value = serde_cbor::to_vec(&PublishedFile {
+            total_chunks: file_processing_result.total_chunks,
+            merkle_root: file_processing_result.merkle_root,
+        })?;
+
+        let record = Record::new(raw_key.to_vec(), value);
+        let record_key = record.key.clone();
+
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::Majority)?;
+
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .start_providing(record_key)?;
+
+        info!(target: LOG_TARGET, "Provided record key: {:?}", u64::from(PublishedFileKey(raw_key)));
+
+        Ok(())
+    }
+
+    pub async fn provide_all_published_files(&mut self) -> Result<(), P2pNetworkError> {
+        let mut receiver_stream = self.store.stream_published_files();
+
+        while let Some(result) = receiver_stream.next().await {
+            let published_file = result?;
+            let metadata_buf = published_file.target_dir.join(METADATA_FILE_NAME);
+            match tokio::fs::read(metadata_buf).await {
+                Ok(data) => self.provide(&data.try_into()?).await?,
+                Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
+            };
+        }
+
+        Ok(())
+    }
+
     pub async fn file_publish(&mut self, result: Result<FileProcessingResult, FileStoreError>) {
         match result {
-            Ok(file_processing_result) => loop {
-                let raw_key = file_processing_result.key();
-                match serde_cbor::to_vec(&PublishedFile {
-                    total_chunks: file_processing_result.total_chunks,
-                    merkle_root: file_processing_result.merkle_root,
-                }) {
-                    Ok(value) => {
-                        let record = Record::new(raw_key.to_vec(), value);
-                        let record_key = record.key.clone();
-                        if let Err(error) = self
-                            .swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .put_record(record, Quorum::Majority)
-                        {
-                            error!("Failed to publish file split record: {}", error);
-                            sleep(Duration::from_secs(1)).await
-                        } else if let Err(error) = self
-                            .swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .start_providing(record_key)
-                        {
-                            error!("Failed to start providing file split record: {}", error);
-                            sleep(Duration::from_secs(1)).await
-                        } else {
-                            self.add_published_file(file_processing_result).await;
-                            self.delete_file_processing_result(raw_key).await;
-                            info!("Successfully published a file");
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        error!(target: LOG_TARGET, "Error serializing file split result: {:?}", error);
-                        sleep(Duration::from_secs(1)).await
-                    }
+            Ok(file_processing_result) => {
+                while let Err(error) = self.provide(&file_processing_result).await {
+                    error!(target: LOG_TARGET, "Error providing file: {}", error);
+                    sleep(Duration::from_secs(1)).await
                 }
-            },
+
+                let raw_key = file_processing_result.key();
+                self.add_published_file(file_processing_result).await;
+                self.delete_file_processing_result(raw_key).await;
+                info!("Successfully published a file");
+            }
             Err(error) => {
                 error!(target: LOG_TARGET, "File store error: {:?}", error);
-                sleep(Duration::from_secs(1)).await
             }
         }
     }
