@@ -160,19 +160,19 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService::new(swarm, self.store.clone());
+        let mut event_service = EventService::new(self.store.clone());
 
-        event_service.provide_all_published_files().await?;
+        event_service.provide_all_published_files(&mut swarm).await?;
 
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         loop {
             select! {
                 _ = ticker.tick() => event_service.work_on_pending_downloads().await,
-                result = self.store.get_next_file_processing_result() => event_service.file_publish(result).await,
-                event = event_service.swarm.select_next_some() => event_service.handle_swarm_event(event).await,
+                result = self.store.get_next_file_processing_result() => event_service.file_publish(&mut swarm, result).await,
+                event = swarm.select_next_some() => event_service.handle_swarm_event(&mut swarm, event).await,
                 command = self.commands_rx.recv() => {
                     if let Some(command) = command {
-                        event_service.handle_command(command).await
+                        event_service.handle_command(&mut swarm, command).await
                     }
                 }
                 _ = cancellation_token.cancelled() => {

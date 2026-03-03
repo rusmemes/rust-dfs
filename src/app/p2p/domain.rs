@@ -44,3 +44,10 @@ pub struct PublishedFile {
     pub total_chunks: usize,
     pub merkle_root: [u8; 32],
 }
+
+#[derive(Debug)]
+pub struct DownloadFileChunk {
+    pub chunk_id: usize,
+    pub merkle_root: [u8; 32],
+    pub merkle_proof: Vec<u8>,
+}

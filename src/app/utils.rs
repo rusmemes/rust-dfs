@@ -1,7 +1,9 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use crate::app::file_processing::processing::FileProcessingResult;
+use futures_util::future::select_all;
 use std::io::{BufWriter, ErrorKind};
 use std::path::PathBuf;
+use tokio::task::JoinHandle;
 
 pub async fn ensure_dir_exists_or_create(path_buf: &PathBuf) -> Result<(), std::io::Error> {
     if tokio::fs::try_exists(&path_buf).await? {
@@ -33,4 +35,22 @@ fn save_blocking(
     let writer = BufWriter::new(file);
     serde_cbor::to_writer(writer, &result)?;
     Ok(result)
+}
+
+pub async fn on_each_join<T, R, F>(mut handles: Vec<JoinHandle<T>>, callback: F) -> Vec<R>
+where
+    F: Fn(T) -> R,
+{
+    let mut result = Vec::with_capacity(handles.len());
+    while !handles.is_empty() {
+        let (res, _idx, remaining) = select_all(handles).await;
+
+        if let Ok(res) = res {
+            result.push(callback(res));
+        }
+
+        handles = remaining;
+    }
+
+    result
 }

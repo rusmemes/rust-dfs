@@ -5,11 +5,12 @@ use crate::app::file_store::domain::{
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::domain::{
-    FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent,
-    PublishedFile,
+    DownloadFileChunk, FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour,
+    P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::utils::METADATA_FILE_NAME;
+use crate::app::utils::{on_each_join, METADATA_FILE_NAME};
+use libp2p::futures::future::join_all;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -23,7 +24,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Mutex, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
@@ -36,27 +38,72 @@ pub struct MetadataProvidersRequestData {
 
 // possible a memory leak for maps caching queries and requests data
 pub struct EventService<S: FileStore> {
-    pub swarm: Swarm<P2pNetworkBehaviour>,
     store: S,
     metadata_providers_requests: HashMap<QueryId, MetadataProvidersRequestData>,
     metadata_download_requests:
         HashMap<OutboundRequestId, oneshot::Sender<Option<FileProcessingResult>>>,
-    active_downloads: Arc<RwLock<HashSet<PublishedFileKey>>>,
+    active_downloads: Arc<Mutex<HashSet<PublishedFileKey>>>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(swarm: Swarm<P2pNetworkBehaviour>, store: S) -> Self {
+    pub fn new(store: S) -> Self {
         Self {
-            swarm,
             store,
             metadata_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
-            active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            active_downloads: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    async fn start_download(pending_download_record: &PendingDownloadRecord) -> anyhow::Result<()> {
-        todo!()
+    async fn download(pending_download_record: &PendingDownloadRecord) -> anyhow::Result<()> {
+        let file_processing_result: FileProcessingResult = tokio::fs::read(
+            pending_download_record
+                .download_path
+                .join(METADATA_FILE_NAME),
+        )
+        .await?
+        .try_into()?;
+
+        let mut join_handles = Vec::with_capacity(file_processing_result.merkle_proofs.len());
+        let semaphore = Arc::new(Semaphore::new(10));
+
+        for chunk_id in 0..file_processing_result.merkle_proofs.len() {
+            let download_file_chunk = DownloadFileChunk {
+                chunk_id,
+                merkle_root: file_processing_result.merkle_root.clone(),
+                merkle_proof: file_processing_result.merkle_proofs[chunk_id].clone(),
+            };
+
+            let local_semaphore = semaphore.clone();
+
+            join_handles.push(tokio::task::spawn(async move {
+                let permit = local_semaphore.acquire().await?;
+                let result = Self::download_file_chunk(download_file_chunk).await;
+                debug!("permission acquired {:?}", permit);
+                result
+            }));
+        }
+
+        let _ = on_each_join(join_handles, |res| {
+            match res {
+                Ok(chunk_id) => {
+                    info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
+                }
+                Err(error) => {
+                    error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                }
+            }
+        }).await;
+
+        info!(target: LOG_TARGET, "done");
+
+        Ok(())
+    }
+
+    async fn download_file_chunk(download_file_chunk: DownloadFileChunk) -> anyhow::Result<usize> {
+        info!(target: LOG_TARGET, "Download file chunk: {:?}, merkle proof is: {:?}", download_file_chunk.chunk_id, download_file_chunk.merkle_proof);
+        sleep(Duration::from_secs(1)).await;
+        Ok(download_file_chunk.chunk_id)
     }
 
     pub async fn work_on_pending_downloads(&mut self) {
@@ -67,19 +114,21 @@ impl<S: FileStore> EventService<S> {
                     let active_downloads = self.active_downloads.clone();
 
                     if active_downloads
-                        .write()
+                        .lock()
                         .await
                         .insert(pending_download_record.key.clone())
                     {
                         tokio::task::spawn(async move {
-                            if let Err(error) = Self::start_download(&pending_download_record).await
+                            if let Err(error) = Self::download(&pending_download_record).await
                             {
-                                error!("Failed to start download: {}", error);
-                                active_downloads
-                                    .write()
-                                    .await
-                                    .remove(&pending_download_record.key);
+                                error!(target: LOG_TARGET, "Failed to start download: {}", error);
+                            } else {
+                                todo!("restore original file and remove from pending downloads");
                             }
+                            active_downloads
+                                .lock()
+                                .await
+                                .remove(&pending_download_record.key);
                         });
                     }
                 }
@@ -90,12 +139,16 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    pub async fn handle_command(&mut self, command: P2pCommand) {
+    pub async fn handle_command(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        command: P2pCommand,
+    ) {
         match command {
             P2pCommand::RequestMetadata { request, result } => {
                 let key: PublishedFileKey = request.file_id.into();
                 let key = RecordKey::new(&key.0);
-                let query_id = self.swarm.behaviour_mut().kademlia.get_providers(key);
+                let query_id = swarm.behaviour_mut().kademlia.get_providers(key);
                 self.metadata_providers_requests.insert(
                     query_id,
                     MetadataProvidersRequestData {
@@ -110,6 +163,7 @@ impl<S: FileStore> EventService<S> {
 
     async fn provide(
         &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
         file_processing_result: &FileProcessingResult,
     ) -> Result<(), P2pNetworkError> {
         let raw_key = file_processing_result.key();
@@ -122,29 +176,29 @@ impl<S: FileStore> EventService<S> {
         let record = Record::new(raw_key.to_vec(), value);
         let record_key = record.key.clone();
 
-        self.swarm
+        swarm
             .behaviour_mut()
             .kademlia
             .put_record(record, Quorum::Majority)?;
 
-        self.swarm
-            .behaviour_mut()
-            .kademlia
-            .start_providing(record_key)?;
+        swarm.behaviour_mut().kademlia.start_providing(record_key)?;
 
         info!(target: LOG_TARGET, "Provided record key: {:?}", u64::from(PublishedFileKey(raw_key)));
 
         Ok(())
     }
 
-    pub async fn provide_all_published_files(&mut self) -> Result<(), P2pNetworkError> {
+    pub async fn provide_all_published_files(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+    ) -> Result<(), P2pNetworkError> {
         let mut receiver_stream = self.store.stream_published_files();
 
         while let Some(result) = receiver_stream.next().await {
             let published_file = result?;
             let metadata_buf = published_file.target_dir.join(METADATA_FILE_NAME);
             match tokio::fs::read(metadata_buf).await {
-                Ok(data) => self.provide(&data.try_into()?).await?,
+                Ok(data) => self.provide(swarm, &data.try_into()?).await?,
                 Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
             };
         }
@@ -152,10 +206,14 @@ impl<S: FileStore> EventService<S> {
         Ok(())
     }
 
-    pub async fn file_publish(&mut self, result: Result<FileProcessingResult, FileStoreError>) {
+    pub async fn file_publish(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        result: Result<FileProcessingResult, FileStoreError>,
+    ) {
         match result {
             Ok(file_processing_result) => {
-                while let Err(error) = self.provide(&file_processing_result).await {
+                while let Err(error) = self.provide(swarm, &file_processing_result).await {
                     error!(target: LOG_TARGET, "Error providing file: {}", error);
                     sleep(Duration::from_secs(1)).await
                 }
@@ -163,7 +221,7 @@ impl<S: FileStore> EventService<S> {
                 let raw_key = file_processing_result.key();
                 self.add_published_file(file_processing_result).await;
                 self.delete_file_processing_result(raw_key).await;
-                info!("Successfully published a file");
+                info!(target: LOG_TARGET, "Successfully published a file");
             }
             Err(error) => {
                 error!(target: LOG_TARGET, "File store error: {:?}", error);
@@ -178,7 +236,7 @@ impl<S: FileStore> EventService<S> {
             .add_published_file(published_file_record.clone())
             .await
         {
-            error!("Failed to add published file: {}", error);
+            error!(target: LOG_TARGET, "Failed to add published file: {}", error);
             sleep(Duration::from_secs(1)).await
         }
     }
@@ -199,20 +257,24 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    pub async fn handle_swarm_event(&mut self, event: SwarmEvent<P2pNetworkBehaviourEvent>) {
+    pub async fn handle_swarm_event(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        event: SwarmEvent<P2pNetworkBehaviourEvent>,
+    ) {
         use P2pNetworkBehaviourEvent::*;
         use SwarmEvent::*;
         match event {
             Behaviour(event) => match event {
-                Identify(event) => self.identify(event),
-                Mdns(event) => self.mdns(event),
-                Kademlia(event) => self.kademlia(event),
+                Identify(event) => self.identify(swarm, event),
+                Mdns(event) => self.mdns(swarm, event),
+                Kademlia(event) => self.kademlia(swarm, event),
                 Gossipsub(event) => self.gossipsub(event),
                 RelayServer(event) => log_debug(&event),
                 RelayClient(event) => log_debug(&event),
                 Dcutr(event) => log_debug(&event),
                 FileDownload(event) => self.file_download(event),
-                MetadataDownload(event) => self.metadata_download(event).await,
+                MetadataDownload(event) => self.metadata_download(swarm, event).await,
                 _ => log_debug(&event),
             },
             NewListenAddr {
@@ -223,7 +285,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn kademlia(&mut self, event: kad::Event) {
+    fn kademlia(&mut self, swarm: &mut Swarm<P2pNetworkBehaviour>, event: kad::Event) {
         use kad::Event::*;
         match event {
             OutboundQueryProgressed {
@@ -232,19 +294,29 @@ impl<S: FileStore> EventService<S> {
                 stats: _stats,
                 step: _step,
             } => {
-                self.handle_metadata_providers_query_progressed(id, result);
+                self.handle_metadata_providers_query_progressed(swarm, id, result);
             }
             _ => log_debug(&event),
         }
     }
 
-    fn handle_metadata_providers_query_progressed(&mut self, id: QueryId, result: QueryResult) {
+    fn handle_metadata_providers_query_progressed(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        id: QueryId,
+        result: QueryResult,
+    ) {
         if let QueryResult::GetProviders(result) = result {
-            self.handle_get_metadata_providers_result(&id, result);
+            self.handle_get_metadata_providers_result(swarm, &id, result);
         }
     }
 
-    fn handle_get_metadata_providers_result(&mut self, id: &QueryId, result: GetProvidersResult) {
+    fn handle_get_metadata_providers_result(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        id: &QueryId,
+        result: GetProvidersResult,
+    ) {
         match result {
             Ok(providers) => match providers {
                 GetProvidersOk::FoundProviders {
@@ -256,21 +328,24 @@ impl<S: FileStore> EventService<S> {
                     }
                 }
                 GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => {
-                    self.handle_all_possible_metadata_providers_found(&id);
+                    self.handle_all_possible_metadata_providers_found(swarm, &id);
                 }
             },
             Err(error) => {
                 error!(target: LOG_TARGET, "Error getting providers: {:?}", error);
-                self.handle_all_possible_metadata_providers_found(&id);
+                self.handle_all_possible_metadata_providers_found(swarm, &id);
             }
         }
     }
 
-    fn handle_all_possible_metadata_providers_found(&mut self, id: &QueryId) {
+    fn handle_all_possible_metadata_providers_found(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        id: &QueryId,
+    ) {
         if let Some(data) = self.metadata_providers_requests.remove(&id) {
             if let Some(peer) = data.found_providers.iter().next() {
-                let request_id = self
-                    .swarm
+                let request_id = swarm
                     .behaviour_mut()
                     .metadata_download
                     .send_request(peer, data.request);
@@ -285,6 +360,7 @@ impl<S: FileStore> EventService<S> {
 
     async fn metadata_download(
         &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
         event: request_response::Event<FileRequest, FileResponse>,
     ) {
         use request_response::Event::*;
@@ -308,18 +384,23 @@ impl<S: FileStore> EventService<S> {
                             public: _public,
                         })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
                             Ok(data) => self.send_metadata_download_response(
+                                swarm,
                                 channel,
                                 FileResponse::Success(data),
                             ),
                             Err(error) => self.send_metadata_download_response(
+                                swarm,
                                 channel,
                                 FileResponse::Error(error.to_string()),
                             ),
                         },
-                        Ok(None) => {
-                            self.send_metadata_download_response(channel, FileResponse::NotFound)
-                        }
+                        Ok(None) => self.send_metadata_download_response(
+                            swarm,
+                            channel,
+                            FileResponse::NotFound,
+                        ),
                         Err(error) => self.send_metadata_download_response(
+                            swarm,
                             channel,
                             FileResponse::Error(error.to_string()),
                         ),
@@ -340,11 +421,11 @@ impl<S: FileStore> EventService<S> {
 
     fn send_metadata_download_response(
         &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
         channel: ResponseChannel<FileResponse>,
         file_response: FileResponse,
     ) {
-        if let Err(error) = self
-            .swarm
+        if let Err(error) = swarm
             .behaviour_mut()
             .metadata_download
             .send_response(channel, file_response)
@@ -429,7 +510,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn mdns(&mut self, event: mdns::Event) {
+    fn mdns(&mut self, swarm: &mut Swarm<P2pNetworkBehaviour>, event: mdns::Event) {
         use mdns::Event::*;
 
         match event {
@@ -438,25 +519,22 @@ impl<S: FileStore> EventService<S> {
                     info!(target: LOG_TARGET, "[mDNS] Discovered {:?} at {:?}", peer_id, addr);
 
                     if is_dialable(&addr) {
-                        self.swarm.add_peer_address(peer_id, addr.clone());
+                        swarm.add_peer_address(peer_id, addr.clone());
                     }
 
-                    self.swarm
+                    swarm
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, addr.clone());
 
-                    self.swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .add_explicit_peer(&peer_id);
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 }
             }
             _ => log_debug(&event),
         }
     }
 
-    fn identify(&mut self, event: identify::Event) {
+    fn identify(&mut self, swarm: &mut Swarm<P2pNetworkBehaviour>, event: identify::Event) {
         use identify::Event::*;
 
         match event {
@@ -471,19 +549,16 @@ impl<S: FileStore> EventService<S> {
                     .any(|p| *p == relay::HOP_PROTOCOL_NAME);
 
                 for addr in info.listen_addrs {
-                    self.swarm
+                    swarm
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, addr.clone());
 
                     if is_dialable(&addr) {
-                        self.swarm.add_peer_address(peer_id, addr.clone());
+                        swarm.add_peer_address(peer_id, addr.clone());
                     }
 
-                    self.swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .add_explicit_peer(&peer_id);
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
 
                     if is_relay {
                         if let Ok(relay_addr) = addr
@@ -497,7 +572,7 @@ impl<S: FileStore> EventService<S> {
                                 relay_addr
                             );
 
-                            if let Err(e) = self.swarm.listen_on(relay_addr.clone()) {
+                            if let Err(e) = swarm.listen_on(relay_addr.clone()) {
                                 warn!(
                                     target: LOG_TARGET,
                                     "Relay listen error on {}: {}",
