@@ -1,6 +1,6 @@
 use crate::app::errors::ServerError;
 use crate::app::file_processing::processing::{process_file, FileProcessingResult};
-use crate::app::file_store::domain::{PendingDownload, PublishedFileKey};
+use crate::app::file_store::domain::{PendingDownloadRecord, PublishedFileKey};
 use crate::app::file_store::FileStore;
 use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
 use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
@@ -104,7 +104,7 @@ where
             ..file_processing_result
         };
 
-        let pending_download = PendingDownload {
+        let pending_download = PendingDownloadRecord {
             key: file_processing_result.key().into(),
             original_file_name: file_processing_result.original_file_name.clone(),
             download_path: file_processing_result.target_dir.clone(),

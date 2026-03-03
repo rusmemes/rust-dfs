@@ -1,5 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::domain::{Iterable, PendingDownload, Persistable};
+use crate::app::file_store::domain::{Iterable, PendingDownloadRecord, Persistable};
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
 use async_trait::async_trait;
@@ -129,7 +129,7 @@ impl Store for RocksDBStore {
         self.stream_all(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
     }
 
-    async fn stream_pending_downloads(&self) -> ReceiverStream<Result<PendingDownload, FileStoreError>> {
+    fn stream_pending_downloads(&self) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>> {
         self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
     }
 
@@ -158,7 +158,7 @@ impl Store for RocksDBStore {
         self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
-    async fn add_pending_download(&self, record: PendingDownload) -> Result<(), FileStoreError> {
+    async fn add_pending_download(&self, record: PendingDownloadRecord) -> Result<(), FileStoreError> {
         self.put(record, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 

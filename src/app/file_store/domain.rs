@@ -10,11 +10,11 @@ pub struct PublishedFileRecord {
     pub public: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct PublishedFileKey(pub [u8; 8]);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PendingDownload {
+pub struct PendingDownloadRecord {
     pub key: PublishedFileKey,
     pub original_file_name: String,
     pub download_path: PathBuf,
@@ -42,7 +42,7 @@ impl TryInto<(PublishedFileKey, Vec<u8>)> for PublishedFileRecord {
     }
 }
 
-impl TryInto<(PublishedFileKey, Vec<u8>)> for PendingDownload {
+impl TryInto<(PublishedFileKey, Vec<u8>)> for PendingDownloadRecord {
     type Error = serde_cbor::Error;
 
     fn try_into(self) -> Result<(PublishedFileKey, Vec<u8>), Self::Error> {
@@ -95,7 +95,7 @@ impl TryFrom<Vec<u8>> for PublishedFileRecord {
     }
 }
 
-impl TryInto<Vec<u8>> for PendingDownload {
+impl TryInto<Vec<u8>> for PendingDownloadRecord {
     type Error = serde_cbor::Error;
 
     fn try_into(self) -> Result<Vec<u8>, Self::Error> {
@@ -103,7 +103,7 @@ impl TryInto<Vec<u8>> for PendingDownload {
     }
 }
 
-impl TryFrom<Vec<u8>> for PendingDownload {
+impl TryFrom<Vec<u8>> for PendingDownloadRecord {
     type Error = serde_cbor::Error;
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         serde_cbor::from_slice(&bytes)

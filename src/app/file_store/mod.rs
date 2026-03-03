@@ -1,5 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::domain::{PendingDownload, PublishedFileKey, PublishedFileRecord};
+use crate::app::file_store::domain::{PendingDownloadRecord, PublishedFileKey, PublishedFileRecord};
 use crate::app::file_store::errors::FileStoreError;
 use async_trait::async_trait;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
@@ -15,16 +15,16 @@ impl<T> FileStore for T where T: Store + Send + Sync + Clone + 'static {}
 pub trait Store {
     fn stream_published_files(&self)
     -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>>;
-    async fn stream_pending_downloads(
+    fn stream_pending_downloads(
         &self,
-    ) -> ReceiverStream<Result<PendingDownload, FileStoreError>>;
+    ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>>;
     async fn get_published_file(
         &self,
         key: PublishedFileKey,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError>;
     async fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError>;
 
-    async fn add_pending_download(&self, record: PendingDownload) -> Result<(), FileStoreError>;
+    async fn add_pending_download(&self, record: PendingDownloadRecord) -> Result<(), FileStoreError>;
 
     async fn persist_file_processing_result(
         &self,

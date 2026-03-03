@@ -18,7 +18,6 @@ use libp2p::{
     yamux, StreamProtocol, Swarm,
 };
 use log::info;
-use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
@@ -161,18 +160,14 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService {
-            swarm,
-            store: self.store.clone(),
-            metadata_providers_requests: HashMap::new(),
-            metadata_download_requests: HashMap::new(),
-        };
+        let mut event_service = EventService::new(swarm, self.store.clone());
 
         event_service.provide_all_published_files().await?;
 
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
         loop {
             select! {
-                stream = self.store.stream_pending_downloads() => event_service.work_on_pending_downloads(stream).await,
+                _ = ticker.tick() => event_service.work_on_pending_downloads().await,
                 result = self.store.get_next_file_processing_result() => event_service.file_publish(result).await,
                 event = event_service.swarm.select_next_some() => event_service.handle_swarm_event(event).await,
                 command = self.commands_rx.recv() => {
