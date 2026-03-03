@@ -172,17 +172,18 @@ impl<S: FileStore> Service for P2pService<S> {
 
         loop {
             select! {
+                stream = self.store.stream_pending_downloads() => event_service.work_on_pending_downloads(stream).await,
                 result = self.store.get_next_file_processing_result() => event_service.file_publish(result).await,
                 event = event_service.swarm.select_next_some() => event_service.handle_swarm_event(event).await,
-                _ = cancellation_token.cancelled() => {
-                    info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
-                    break
-                },
                 command = self.commands_rx.recv() => {
                     if let Some(command) = command {
                         event_service.handle_command(command).await
                     }
                 }
+                _ = cancellation_token.cancelled() => {
+                    info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
+                    break
+                },
             }
         }
 

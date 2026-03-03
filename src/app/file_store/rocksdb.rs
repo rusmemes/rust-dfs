@@ -1,7 +1,7 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::domain::PendingDownload;
+use crate::app::file_store::domain::{Iterable, PendingDownload, Persistable};
 use crate::app::file_store::errors::FileStoreError;
-use crate::app::file_store::{Persistable, PublishedFileKey, PublishedFileRecord, Store};
+use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
 use async_trait::async_trait;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use std::path::PathBuf;
@@ -60,16 +60,11 @@ impl RocksDBStore {
         .await?
     }
 
-    async fn put<R: Persistable + Send + 'static>(
-        &self,
-        record: R,
-        cf: &'static str,
-    ) -> Result<(), FileStoreError> {
+    async fn put<R: Persistable>(&self, record: R, cf: &'static str) -> Result<(), FileStoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
-            let key = record.key();
-            let value: Vec<u8> = record.value().map_err(|e| RocksDbStoreError::CBor(e))?;
+            let (key, value) = record.try_into().map_err(|e| RocksDbStoreError::CBor(e))?;
 
             db.put_cf(get_cf(&db, cf)?, key.0, value)
                 .map_err(|e| RocksDbStoreError::RocksDb(e))?;
@@ -78,24 +73,16 @@ impl RocksDBStore {
         })
         .await?
     }
-}
 
-fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreError> {
-    Ok(db
-        .cf_handle(x)
-        .ok_or_else(|| RocksDbStoreError::CfMissing(x.to_owned()))?)
-}
-
-#[async_trait]
-impl Store for RocksDBStore {
-    fn stream_published_files(
+    fn stream_all<R: Iterable>(
         &self,
-    ) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>> {
+        cf: &'static str,
+    ) -> ReceiverStream<Result<R, FileStoreError>> {
         let db = self.db.clone();
         let (tx, rx) = mpsc::channel(64);
 
         tokio::task::spawn_blocking(move || {
-            let cf = match get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME) {
+            let cf = match get_cf(&db, cf) {
                 Ok(cf) => cf,
                 Err(e) => {
                     let _ = tx.blocking_send(Err(e));
@@ -125,6 +112,25 @@ impl Store for RocksDBStore {
         });
 
         ReceiverStream::new(rx)
+    }
+}
+
+fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreError> {
+    Ok(db
+        .cf_handle(x)
+        .ok_or_else(|| RocksDbStoreError::CfMissing(x.to_owned()))?)
+}
+
+#[async_trait]
+impl Store for RocksDBStore {
+    fn stream_published_files(
+        &self,
+    ) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>> {
+        self.stream_all(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
+    }
+
+    async fn stream_pending_downloads(&self) -> ReceiverStream<Result<PendingDownload, FileStoreError>> {
+        self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
     }
 
     async fn get_published_file(

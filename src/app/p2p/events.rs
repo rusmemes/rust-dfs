@@ -1,5 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::domain::{PublishedFileKey, PublishedFileRecord};
+use crate::app::file_store::domain::{PendingDownload, PublishedFileKey, PublishedFileRecord};
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::domain::{
@@ -19,9 +19,10 @@ use libp2p::{gossipsub, identify, kad, mdns, relay, request_response, PeerId, Sw
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
+use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
@@ -56,6 +57,28 @@ impl<S: FileStore> EventService<S> {
                     },
                 );
             }
+        }
+    }
+
+    async fn work_on_pending_downloads_(
+        &mut self,
+        stream: ReceiverStream<Result<PendingDownload, FileStoreError>>,
+    ) {
+        todo!()
+    }
+
+    pub async fn work_on_pending_downloads(
+        &mut self,
+        stream: ReceiverStream<Result<PendingDownload, FileStoreError>>,
+    ) {
+        let start = Instant::now();
+
+        self.work_on_pending_downloads_(stream).await;
+
+        const ONE_SEC: Duration = Duration::from_secs(1);
+        let duration = start.elapsed() - ONE_SEC;
+        if !duration.is_zero() { // can't be negative
+            sleep(duration).await;
         }
     }
 

@@ -1,7 +1,5 @@
 use crate::app::file_processing::processing::FileProcessingResult;
-use crate::app::file_store::Persistable;
 use serde::{Deserialize, Serialize};
-use serde_cbor::Error;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -10,16 +8,6 @@ pub struct PublishedFileRecord {
     pub original_file_name: String,
     pub target_dir: PathBuf,
     pub public: bool,
-}
-
-impl Persistable for PublishedFileRecord {
-    fn key(&self) -> PublishedFileKey {
-        self.key.clone()
-    }
-
-    fn value(&self) -> Result<Vec<u8>, Error> {
-        serde_cbor::to_vec(self)
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,13 +20,34 @@ pub struct PendingDownload {
     pub download_path: PathBuf,
 }
 
-impl Persistable for PendingDownload {
-    fn key(&self) -> PublishedFileKey {
-        self.key.clone()
-    }
+pub trait Persistable:
+    TryInto<(PublishedFileKey, Vec<u8>), Error = serde_cbor::Error> + Send + 'static
+{
+}
 
-    fn value(&self) -> Result<Vec<u8>, Error> {
-        serde_cbor::to_vec(self)
+impl<T> Persistable for T where
+    T: TryInto<(PublishedFileKey, Vec<u8>), Error = serde_cbor::Error> + Send + 'static
+{
+}
+
+pub trait Iterable: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static {}
+impl <T> Iterable for T where T: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static {}
+
+impl TryInto<(PublishedFileKey, Vec<u8>)> for PublishedFileRecord {
+    type Error = serde_cbor::Error;
+
+    fn try_into(self) -> Result<(PublishedFileKey, Vec<u8>), Self::Error> {
+        let key = self.key.clone();
+        TryInto::try_into(self).map(|bytes| (key, bytes))
+    }
+}
+
+impl TryInto<(PublishedFileKey, Vec<u8>)> for PendingDownload {
+    type Error = serde_cbor::Error;
+
+    fn try_into(self) -> Result<(PublishedFileKey, Vec<u8>), Self::Error> {
+        let key = self.key.clone();
+        TryInto::try_into(self).map(|bytes| (key, bytes))
     }
 }
 

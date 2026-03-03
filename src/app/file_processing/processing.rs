@@ -1,6 +1,5 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use crate::app::file_store::domain::PublishedFileKey;
-use crate::app::file_store::Persistable;
 use crate::app::utils::save_metadata;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleTree};
@@ -24,16 +23,6 @@ pub struct FileProcessingResult {
     pub public: bool,
 }
 
-impl Persistable for FileProcessingResult {
-    fn key(&self) -> PublishedFileKey {
-        PublishedFileKey(self.key())
-    }
-
-    fn value(&self) -> Result<Vec<u8>, serde_cbor::Error> {
-        serde_cbor::to_vec(self)
-    }
-}
-
 impl FileProcessingResult {
     pub fn key(&self) -> [u8; 8] {
         let mut hasher = Sha256Hasher::default();
@@ -48,6 +37,15 @@ impl Hash for FileProcessingResult {
         self.total_chunks.hash(state);
         self.merkle_root.hash(state);
         self.public.hash(state);
+    }
+}
+
+impl TryInto<(PublishedFileKey, Vec<u8>)> for FileProcessingResult {
+    type Error = serde_cbor::Error;
+
+    fn try_into(self) -> Result<(PublishedFileKey, Vec<u8>), Self::Error> {
+        let key: PublishedFileKey = PublishedFileKey(self.key());
+        TryFrom::try_from(self).map(|bytes| (key, bytes))
     }
 }
 
