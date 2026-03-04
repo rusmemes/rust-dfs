@@ -10,7 +10,6 @@ use crate::app::p2p::domain::{
 };
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::utils::{on_each_join, METADATA_FILE_NAME};
-use libp2p::futures::future::join_all;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -25,7 +24,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Semaphore};
-use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
@@ -76,10 +74,10 @@ impl<S: FileStore> EventService<S> {
 
             let local_semaphore = semaphore.clone();
 
-            join_handles.push(tokio::task::spawn(async move {
+            join_handles.push(tokio::spawn(async move {
                 let permit = local_semaphore.acquire().await?;
                 let result = Self::download_file_chunk(download_file_chunk).await;
-                debug!("permission acquired {:?}", permit);
+                debug!("semaphore released {:?}", permit);
                 result
             }));
         }
@@ -94,8 +92,6 @@ impl<S: FileStore> EventService<S> {
                 }
             }
         }).await;
-
-        info!(target: LOG_TARGET, "done");
 
         Ok(())
     }
@@ -118,7 +114,7 @@ impl<S: FileStore> EventService<S> {
                         .await
                         .insert(pending_download_record.key.clone())
                     {
-                        tokio::task::spawn(async move {
+                        tokio::spawn(async move {
                             if let Err(error) = Self::download(&pending_download_record).await
                             {
                                 error!(target: LOG_TARGET, "Failed to start download: {}", error);
