@@ -27,6 +27,8 @@ pub struct Cli {
     pub base_path: PathBuf,
     #[arg(short, long, default_value_t = 9999)]
     pub grpc_port: u16,
+    #[arg(short, long, default_value_t = 10)]
+    pub max_active_downloads: u16,
     #[command(subcommand)]
     pub command: Command,
 }

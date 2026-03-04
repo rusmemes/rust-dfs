@@ -30,6 +30,7 @@ pub struct P2pService<S: FileStore> {
     config: P2pServiceConfig,
     store: S,
     pub commands_rx: mpsc::Receiver<P2pCommand>,
+    max_active_downloads: u16,
 }
 
 impl<S: FileStore> P2pService<S> {
@@ -37,11 +38,13 @@ impl<S: FileStore> P2pService<S> {
         config: P2pServiceConfig,
         store: S,
         commands_rx: mpsc::Receiver<P2pCommand>,
+        max_active_downloads: u16,
     ) -> Self {
         Self {
             config,
             store,
             commands_rx,
+            max_active_downloads,
         }
     }
 
@@ -160,9 +163,11 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService::new(self.store.clone());
+        let mut event_service = EventService::new(self.store.clone(), self.max_active_downloads);
 
-        event_service.provide_all_published_files(&mut swarm).await?;
+        event_service
+            .provide_all_published_files(&mut swarm)
+            .await?;
 
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         loop {

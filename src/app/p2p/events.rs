@@ -42,19 +42,24 @@ pub struct EventService<S: FileStore> {
     metadata_download_requests:
         HashMap<OutboundRequestId, oneshot::Sender<Option<FileProcessingResult>>>,
     active_downloads: Arc<Mutex<HashSet<PublishedFileKey>>>,
+    active_downloads_semaphore: Arc<Semaphore>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(store: S) -> Self {
+    pub fn new(store: S, max_active_downloads: u16) -> Self {
         Self {
             store,
             metadata_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
             active_downloads: Arc::new(Mutex::new(HashSet::new())),
+            active_downloads_semaphore: Arc::new(Semaphore::new(max_active_downloads as usize)),
         }
     }
 
-    async fn download(pending_download_record: &PendingDownloadRecord) -> anyhow::Result<()> {
+    async fn download(
+        pending_download_record: &PendingDownloadRecord,
+        semaphore: Arc<Semaphore>,
+    ) -> anyhow::Result<()> {
         let file_processing_result: FileProcessingResult = tokio::fs::read(
             pending_download_record
                 .download_path
@@ -62,8 +67,6 @@ impl<S: FileStore> EventService<S> {
         )
         .await?
         .try_into()?;
-
-        let semaphore = Arc::new(Semaphore::new(10));
 
         let mut join_set = JoinSet::new();
         for chunk_id in 0..file_processing_result.merkle_proofs.len() {
@@ -104,8 +107,16 @@ impl<S: FileStore> EventService<S> {
     }
 
     pub async fn work_on_pending_downloads(&mut self) {
+        if self.active_downloads_semaphore.available_permits() == 0 {
+            info!(target: LOG_TARGET, "no download permits available");
+            return;
+        }
         let mut stream = self.store.stream_pending_downloads();
         while let Some(result) = stream.next().await {
+            if self.active_downloads_semaphore.available_permits() == 0 {
+                info!(target: LOG_TARGET, "no download permits available");
+                return;
+            }
             match result {
                 Ok(pending_download_record) => {
                     let active_downloads = self.active_downloads.clone();
@@ -115,8 +126,10 @@ impl<S: FileStore> EventService<S> {
                         .await
                         .insert(pending_download_record.key.clone())
                     {
+                        let semaphore = self.active_downloads_semaphore.clone();
+
                         tokio::spawn(async move {
-                            if let Err(error) = Self::download(&pending_download_record).await {
+                            if let Err(error) = Self::download(&pending_download_record, semaphore).await {
                                 error!(target: LOG_TARGET, "Failed to start download: {}", error);
                             } else {
                                 todo!("restore original file and remove from pending downloads");
