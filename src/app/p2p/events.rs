@@ -9,7 +9,7 @@ use crate::app::p2p::domain::{
     P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::utils::{on_each_join, METADATA_FILE_NAME};
+use crate::app::utils::METADATA_FILE_NAME;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -24,6 +24,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
@@ -62,9 +63,9 @@ impl<S: FileStore> EventService<S> {
         .await?
         .try_into()?;
 
-        let mut join_handles = Vec::with_capacity(file_processing_result.merkle_proofs.len());
         let semaphore = Arc::new(Semaphore::new(10));
 
+        let mut join_set = JoinSet::new();
         for chunk_id in 0..file_processing_result.merkle_proofs.len() {
             let download_file_chunk = DownloadFileChunk {
                 chunk_id,
@@ -74,7 +75,7 @@ impl<S: FileStore> EventService<S> {
 
             let local_semaphore = semaphore.clone();
 
-            join_handles.push(tokio::spawn(async move {
+            join_set.spawn(tokio::spawn(async move {
                 let permit = local_semaphore.acquire().await?;
                 let result = Self::download_file_chunk(download_file_chunk).await;
                 debug!("semaphore released {:?}", permit);
@@ -82,8 +83,9 @@ impl<S: FileStore> EventService<S> {
             }));
         }
 
-        let _ = on_each_join(join_handles, |res| {
-            match res {
+        while let Some(result) = join_set.join_next().await {
+            let result = result??;
+            match result {
                 Ok(chunk_id) => {
                     info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
                 }
@@ -91,13 +93,12 @@ impl<S: FileStore> EventService<S> {
                     error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
                 }
             }
-        }).await;
+        }
 
         Ok(())
     }
 
     async fn download_file_chunk(download_file_chunk: DownloadFileChunk) -> anyhow::Result<usize> {
-        info!(target: LOG_TARGET, "Download file chunk: {:?}, merkle proof is: {:?}", download_file_chunk.chunk_id, download_file_chunk.merkle_proof);
         sleep(Duration::from_secs(1)).await;
         Ok(download_file_chunk.chunk_id)
     }
@@ -115,8 +116,7 @@ impl<S: FileStore> EventService<S> {
                         .insert(pending_download_record.key.clone())
                     {
                         tokio::spawn(async move {
-                            if let Err(error) = Self::download(&pending_download_record).await
-                            {
+                            if let Err(error) = Self::download(&pending_download_record).await {
                                 error!(target: LOG_TARGET, "Failed to start download: {}", error);
                             } else {
                                 todo!("restore original file and remove from pending downloads");

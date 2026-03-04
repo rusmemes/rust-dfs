@@ -788,7 +788,6 @@ dependencies = [
  "clap",
  "clap_derive",
  "env_logger",
- "futures-util",
  "homedir",
  "libp2p",
  "log",
