@@ -18,6 +18,10 @@ pub trait Store {
     fn stream_pending_downloads(
         &self,
     ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>>;
+    async fn get_pending_download(
+        &self,
+        key: PublishedFileKey,
+    ) -> Result<Option<PendingDownloadRecord>, FileStoreError>;
     async fn get_published_file(
         &self,
         key: PublishedFileKey,

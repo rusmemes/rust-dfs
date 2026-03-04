@@ -7,8 +7,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileRequest {
+pub struct MetadataFileRequest {
     pub file_id: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileChunkRequest {
+    pub file_id: u64,
+    pub chunk_id: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,8 +26,12 @@ pub enum FileResponse {
 
 pub enum P2pCommand {
     RequestMetadata {
-        request: FileRequest,
+        request: MetadataFileRequest,
         result: oneshot::Sender<Option<FileProcessingResult>>,
+    },
+    RequestFileChunk {
+        request: FileChunkRequest,
+        result: oneshot::Sender<FileResponse>,
     },
 }
 
@@ -35,8 +45,8 @@ pub struct P2pNetworkBehaviour {
     pub relay_server: relay::Behaviour,
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
-    pub file_download: cbor::Behaviour<FileRequest, FileResponse>,
-    pub metadata_download: cbor::Behaviour<FileRequest, FileResponse>,
+    pub file_download: cbor::Behaviour<FileChunkRequest, FileResponse>,
+    pub metadata_download: cbor::Behaviour<MetadataFileRequest, FileResponse>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

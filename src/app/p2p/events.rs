@@ -5,8 +5,8 @@ use crate::app::file_store::domain::{
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::domain::{
-    DownloadFileChunk, FileRequest, FileResponse, P2pCommand, P2pNetworkBehaviour,
-    P2pNetworkBehaviourEvent, PublishedFile,
+    DownloadFileChunk, FileChunkRequest, FileResponse, MetadataFileRequest, P2pCommand,
+    P2pNetworkBehaviour, P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::utils::METADATA_FILE_NAME;
@@ -21,6 +21,7 @@ use libp2p::{gossipsub, identify, kad, mdns, relay, request_response, PeerId, Sw
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Semaphore};
@@ -31,7 +32,7 @@ const LOG_TARGET: &str = "app::p2p::events";
 
 pub struct MetadataProvidersRequestData {
     found_providers: HashSet<PeerId>,
-    request: FileRequest,
+    request: MetadataFileRequest,
     result: oneshot::Sender<Option<FileProcessingResult>>,
 }
 
@@ -56,10 +57,11 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn download(
-        pending_download_record: &PendingDownloadRecord,
+    async fn download<FS: FileStore>(
+        pending_download_record: &mut PendingDownloadRecord,
         semaphore: Arc<Semaphore>,
-    ) -> anyhow::Result<()> {
+        store: FS,
+    ) -> anyhow::Result<bool> {
         let file_processing_result: FileProcessingResult = tokio::fs::read(
             pending_download_record
                 .download_path
@@ -70,6 +72,13 @@ impl<S: FileStore> EventService<S> {
 
         let mut join_set = JoinSet::new();
         for chunk_id in 0..file_processing_result.merkle_proofs.len() {
+            if pending_download_record
+                .downloaded_chunks
+                .contains(&chunk_id)
+            {
+                continue;
+            }
+
             let download_file_chunk = DownloadFileChunk {
                 chunk_id,
                 merkle_root: file_processing_result.merkle_root.clone(),
@@ -80,25 +89,56 @@ impl<S: FileStore> EventService<S> {
 
             join_set.spawn(tokio::spawn(async move {
                 let permit = local_semaphore.acquire().await?;
+                debug!("permit acquired {:?}", permit);
                 let result = Self::download_file_chunk(download_file_chunk).await;
-                debug!("semaphore released {:?}", permit);
+                debug!("permit released {:?}", permit);
                 result
             }));
         }
 
+        let mut first_error = None;
         while let Some(result) = join_set.join_next().await {
-            let result = result??;
             match result {
-                Ok(chunk_id) => {
-                    info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
-                }
+                Ok(result) => match result {
+                    Ok(result) => match result {
+                        Ok(chunk_id) => {
+                            info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
+                            if pending_download_record.downloaded_chunks.insert(chunk_id) {
+                                if let Err(error) = store
+                                    .add_pending_download(pending_download_record.clone())
+                                    .await
+                                {
+                                    error!("failed to update pending download: {}", error);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                        if first_error.is_none() {
+                            first_error = Some(error.into());
+                        }
+                    }
+                },
                 Err(error) => {
                     error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                    if first_error.is_none() {
+                        first_error = Some(error.into());
+                    }
                 }
             }
         }
 
-        Ok(())
+        first_error
+            .map(Err)
+            .unwrap_or(Ok(pending_download_record.downloaded_chunks.len()
+                == file_processing_result.merkle_proofs.len()))
     }
 
     async fn download_file_chunk(download_file_chunk: DownloadFileChunk) -> anyhow::Result<usize> {
@@ -118,7 +158,7 @@ impl<S: FileStore> EventService<S> {
                 return;
             }
             match result {
-                Ok(pending_download_record) => {
+                Ok(mut pending_download_record) => {
                     let active_downloads = self.active_downloads.clone();
 
                     if active_downloads
@@ -127,12 +167,21 @@ impl<S: FileStore> EventService<S> {
                         .insert(pending_download_record.key.clone())
                     {
                         let semaphore = self.active_downloads_semaphore.clone();
-
+                        let store = self.store.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = Self::download(&pending_download_record, semaphore).await {
-                                error!(target: LOG_TARGET, "Failed to start download: {}", error);
-                            } else {
-                                todo!("restore original file and remove from pending downloads");
+                            match Self::download(&mut pending_download_record, semaphore, store)
+                                .await
+                            {
+                                Ok(completed) => {
+                                    if completed {
+                                        // todo!(
+                                        //     "restore original file, remove from pending downloads and start providing the downloaded data"
+                                        // );
+                                    }
+                                }
+                                Err(error) => {
+                                    error!(target: LOG_TARGET, "Failed to start download: {}", error);
+                                }
                             }
                             active_downloads
                                 .lock()
@@ -166,6 +215,9 @@ impl<S: FileStore> EventService<S> {
                         result,
                     },
                 );
+            }
+            P2pCommand::RequestFileChunk { request, result } => {
+                // TODO
             }
         }
     }
@@ -282,7 +334,7 @@ impl<S: FileStore> EventService<S> {
                 RelayServer(event) => log_debug(&event),
                 RelayClient(event) => log_debug(&event),
                 Dcutr(event) => log_debug(&event),
-                FileDownload(event) => self.file_download(event),
+                FileDownload(event) => self.file_download(swarm, event).await,
                 MetadataDownload(event) => self.metadata_download(swarm, event).await,
                 _ => log_debug(&event),
             },
@@ -370,7 +422,7 @@ impl<S: FileStore> EventService<S> {
     async fn metadata_download(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        event: request_response::Event<FileRequest, FileResponse>,
+        event: request_response::Event<MetadataFileRequest, FileResponse>,
     ) {
         use request_response::Event::*;
         match event {
@@ -392,23 +444,17 @@ impl<S: FileStore> EventService<S> {
                             target_dir,
                             public: _public,
                         })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
-                            Ok(data) => self.send_metadata_download_response(
-                                swarm,
-                                channel,
-                                FileResponse::Success(data),
-                            ),
-                            Err(error) => self.send_metadata_download_response(
+                            Ok(data) => {
+                                self.send_file_response(swarm, channel, FileResponse::Success(data))
+                            }
+                            Err(error) => self.send_file_response(
                                 swarm,
                                 channel,
                                 FileResponse::Error(error.to_string()),
                             ),
                         },
-                        Ok(None) => self.send_metadata_download_response(
-                            swarm,
-                            channel,
-                            FileResponse::NotFound,
-                        ),
-                        Err(error) => self.send_metadata_download_response(
+                        Ok(None) => self.send_file_response(swarm, channel, FileResponse::NotFound),
+                        Err(error) => self.send_file_response(
                             swarm,
                             channel,
                             FileResponse::Error(error.to_string()),
@@ -428,7 +474,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn send_metadata_download_response(
+    fn send_file_response(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         channel: ResponseChannel<FileResponse>,
@@ -476,7 +522,11 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn file_download(&mut self, event: request_response::Event<FileRequest, FileResponse>) {
+    async fn file_download(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        event: request_response::Event<FileChunkRequest, FileResponse>,
+    ) {
         use request_response::Event::*;
         match event {
             Message {
@@ -488,10 +538,34 @@ impl<S: FileStore> EventService<S> {
                 match message {
                     Request {
                         request_id: _request_id,
-                        request,
-                        channel: _channel,
+                        request: FileChunkRequest { file_id, chunk_id },
+                        channel,
                     } => {
-                        info!(target: LOG_TARGET, "File download request: {:?}", request);
+                        info!(target: LOG_TARGET, "File download request: file id {}, chunk id {}", file_id, chunk_id);
+
+                        match self.store.get_published_file(file_id.into()).await {
+                            Ok(None) => {
+                                self.try_from_pending_downloads(swarm, file_id, chunk_id, channel)
+                                    .await
+                            }
+                            Ok(Some(PublishedFileRecord {
+                                key: _key,
+                                original_file_name: _original_file_name,
+                                target_dir,
+                                public: _public,
+                            })) => {
+                                self.get_from_chunks(swarm, chunk_id, channel, target_dir)
+                                    .await
+                            }
+                            Err(error) => {
+                                error!(target: LOG_TARGET, "Error getting published file: {:?}", error);
+                                self.send_file_response(
+                                    swarm,
+                                    channel,
+                                    FileResponse::Error(error.to_string()),
+                                );
+                            }
+                        };
                     }
                     Response {
                         request_id: _request_id,
@@ -502,6 +576,103 @@ impl<S: FileStore> EventService<S> {
                 }
             }
             _ => log_debug(&event),
+        }
+    }
+
+    async fn get_from_chunks(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        chunk_id: usize,
+        channel: ResponseChannel<FileResponse>,
+        target_dir: PathBuf,
+    ) {
+        let file_processing_result: FileProcessingResult = match tokio::fs::read(
+            target_dir.join(METADATA_FILE_NAME),
+        )
+        .await
+        {
+            Ok(bytes) => match bytes.try_into() {
+                Ok(file_processing_result) => file_processing_result,
+                Err(error) => {
+                    error!(target: LOG_TARGET, "Error deserializing metadata from file: {:?}", error);
+                    self.send_file_response(swarm, channel, FileResponse::Error(error.to_string()));
+                    return;
+                }
+            },
+            Err(error) => {
+                error!(target: LOG_TARGET, "Error reading metadata file: {:?}", error);
+                self.send_file_response(swarm, channel, FileResponse::Error(error.to_string()));
+                return;
+            }
+        };
+
+        let FileProcessingResult {
+            original_file_name: _original_file_name,
+            total_chunks,
+            target_dir,
+            merkle_root: _merkle_root,
+            merkle_proofs: _merkle_proofs,
+            chunk_file_extension,
+            public: _public,
+        } = file_processing_result;
+
+        if chunk_id >= total_chunks {
+            self.send_file_response(
+                swarm,
+                channel,
+                FileResponse::Error(format!("incorrect chunk number: {}", chunk_id)),
+            );
+            return;
+        }
+
+        self.read_chunk(swarm, chunk_id, channel, target_dir, chunk_file_extension)
+            .await;
+    }
+
+    async fn read_chunk(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        chunk_id: usize,
+        channel: ResponseChannel<FileResponse>,
+        target_dir: PathBuf,
+        chunk_file_extension: String,
+    ) {
+        match tokio::fs::read(target_dir.join(format!("{}.{}", chunk_id, chunk_file_extension)))
+            .await
+        {
+            Ok(bytes) => self.send_file_response(swarm, channel, FileResponse::Success(bytes)),
+            Err(error) => {
+                error!(target: LOG_TARGET, "Error reading chunk file: {:?}", error);
+                self.send_file_response(swarm, channel, FileResponse::Error(error.to_string()))
+            }
+        }
+    }
+
+    async fn try_from_pending_downloads(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        file_id: u64,
+        chunk_id: usize,
+        channel: ResponseChannel<FileResponse>,
+    ) {
+        match self.store.get_pending_download(file_id.into()).await {
+            Ok(None) => self.send_file_response(swarm, channel, FileResponse::NotFound),
+            Ok(Some(PendingDownloadRecord {
+                key: _key,
+                original_file_name: _original_file_name,
+                download_path,
+                downloaded_chunks,
+            })) => {
+                if downloaded_chunks.contains(&chunk_id) {
+                    self.get_from_chunks(swarm, chunk_id, channel, download_path).await;
+                } else {
+                    self.send_file_response(swarm, channel, FileResponse::NotFound);
+                }
+            }
+            Err(error) => {
+                error!(target: LOG_TARGET, "Error finding pending download: {:?}", error);
+                self.send_file_response(swarm, channel, FileResponse::Error(error.to_string()));
+            }
         }
     }
 

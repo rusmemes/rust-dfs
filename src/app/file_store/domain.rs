@@ -1,5 +1,6 @@
 use crate::app::file_processing::processing::FileProcessingResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -18,6 +19,18 @@ pub struct PendingDownloadRecord {
     pub key: PublishedFileKey,
     pub original_file_name: String,
     pub download_path: PathBuf,
+    pub downloaded_chunks: HashSet<usize>
+}
+
+impl PendingDownloadRecord {
+    pub fn new(key: PublishedFileKey, original_file_name: String, download_path: PathBuf) -> Self {
+        Self {
+            key,
+            original_file_name,
+            download_path,
+            downloaded_chunks: HashSet::new()
+        }
+    }
 }
 
 pub trait Persistable:

@@ -129,8 +129,31 @@ impl Store for RocksDBStore {
         self.stream_all(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
     }
 
-    fn stream_pending_downloads(&self) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>> {
+    fn stream_pending_downloads(
+        &self,
+    ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>> {
         self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
+    }
+
+    async fn get_pending_download(
+        &self,
+        key: PublishedFileKey,
+    ) -> Result<Option<PendingDownloadRecord>, FileStoreError> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let option = db
+                .get_cf(get_cf(&db, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)?, key.0)
+                .map_err(RocksDbStoreError::RocksDb)?;
+
+            if let Some(record) = option {
+                let result: Result<PendingDownloadRecord, serde_cbor::Error> = record.try_into();
+                return Ok(result.map(Some).map_err(RocksDbStoreError::CBor)?);
+            }
+
+            Ok(None)
+        })
+        .await?
     }
 
     async fn get_published_file(
@@ -158,7 +181,10 @@ impl Store for RocksDBStore {
         self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
-    async fn add_pending_download(&self, record: PendingDownloadRecord) -> Result<(), FileStoreError> {
+    async fn add_pending_download(
+        &self,
+        record: PendingDownloadRecord,
+    ) -> Result<(), FileStoreError> {
         self.put(record, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 

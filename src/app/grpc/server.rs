@@ -7,11 +7,12 @@ use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::PublishFileResponse;
 use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
 use crate::app::grpc::errors::GrpcServerError;
-use crate::app::p2p::domain::{FileRequest, P2pCommand};
+use crate::app::p2p::domain::{MetadataFileRequest, P2pCommand};
 use crate::app::server::Service;
 use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
 use log::info;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -68,7 +69,7 @@ where
 
         self.command_sender
             .send(P2pCommand::RequestMetadata {
-                request: FileRequest {
+                request: MetadataFileRequest {
                     file_id: request.file_id,
                 },
                 result: tx,
@@ -104,11 +105,11 @@ where
             ..file_processing_result
         };
 
-        let pending_download = PendingDownloadRecord {
-            key: file_processing_result.key().into(),
-            original_file_name: file_processing_result.original_file_name.clone(),
-            download_path: file_processing_result.target_dir.clone(),
-        };
+        let pending_download = PendingDownloadRecord::new(
+            file_processing_result.key().into(),
+            file_processing_result.original_file_name.clone(),
+            file_processing_result.target_dir.clone(),
+        );
 
         save_metadata(file_processing_result)
             .await
