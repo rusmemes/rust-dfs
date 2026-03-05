@@ -129,11 +129,13 @@ impl RocksDBStore {
                 return Ok(false);
             }
 
-            let result = db
-                .get_pinned_cf(cf_handle, &key.0)
-                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+            let mut opts = rocksdb::ReadOptions::default();
+            opts.fill_cache(false);
 
-            Ok(result.is_some())
+            Ok(db
+                .get_pinned_cf_opt(cf_handle, &key.0, &opts)
+                .map_err(|e| RocksDbStoreError::RocksDb(e))?
+                .is_some())
         })
         .await?
     }
