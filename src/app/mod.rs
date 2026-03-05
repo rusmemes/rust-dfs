@@ -8,3 +8,4 @@ mod file_processing;
 pub mod file_store;
 pub mod grpc;
 mod utils;
+mod file_download_service;

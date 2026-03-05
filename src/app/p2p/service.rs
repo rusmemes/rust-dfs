@@ -1,10 +1,10 @@
 use crate::app::errors::ServerError;
+use crate::app::file_download_service::FileDownloadService;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::{P2pCommand, P2pNetworkBehaviour};
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::events::EventService;
-use crate::app::p2p::file_download_service::FileDownloadService;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
