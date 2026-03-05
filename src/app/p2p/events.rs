@@ -24,7 +24,6 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -223,7 +222,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    pub async fn work_on_pending_downloads(&mut self, tx: Sender<FileProcessingResult>) {
+    pub async fn work_on_pending_downloads(&mut self, tx: mpsc::Sender<FileProcessingResult>) {
         if self.active_downloads_semaphore.available_permits() == 0 {
             info!(target: LOG_TARGET, "no download permits available");
             return;
@@ -290,7 +289,7 @@ impl<S: FileStore> EventService<S> {
     async fn process_completed<FS: FileStore>(
         store: FS,
         pending_download_record: &mut PendingDownloadRecord,
-        sender: Sender<FileProcessingResult>,
+        sender: mpsc::Sender<FileProcessingResult>,
     ) -> anyhow::Result<()> {
         let file_processing_result = restore_original_file(&pending_download_record).await?;
         store
