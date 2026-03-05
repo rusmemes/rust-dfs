@@ -177,6 +177,9 @@ impl<S: FileStore> Service for P2pService<S> {
             .await?;
 
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
+
+        let (tx, mut rx) = mpsc::channel(1);
+
         loop {
             select! {
                 result = self.store.get_next_file_processing_result() => event_service.file_publish(&mut swarm, result).await,
@@ -186,7 +189,8 @@ impl<S: FileStore> Service for P2pService<S> {
                         event_service.handle_command(&mut swarm, command).await
                     }
                 }
-                _ = ticker.tick() => event_service.work_on_pending_downloads().await,
+                record_to_provide = rx.recv() => event_service.provide(&mut swarm, record_to_provide).await,
+                _ = ticker.tick() => event_service.work_on_pending_downloads(tx.clone()).await,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break

@@ -76,6 +76,12 @@ impl From<[u8; 8]> for PublishedFileKey {
     }
 }
 
+impl From<PublishedFileKey> for [u8; 8] {
+    fn from(value: PublishedFileKey) -> Self {
+        value.0
+    }
+}
+
 impl From<u64> for PublishedFileKey {
     fn from(key: u64) -> PublishedFileKey {
         PublishedFileKey(key.to_be_bytes())

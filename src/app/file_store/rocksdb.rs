@@ -74,6 +74,47 @@ impl RocksDBStore {
         .await?
     }
 
+    async fn get<R>(
+        &self,
+        key: PublishedFileKey,
+        cf: &'static str,
+    ) -> Result<Option<R>, FileStoreError>
+    where
+        R: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static,
+    {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let option = db
+                .get_cf(get_cf(&db, cf)?, key.0)
+                .map_err(RocksDbStoreError::RocksDb)?;
+
+            if let Some(record) = option {
+                let result: Result<R, serde_cbor::Error> = record.try_into();
+                return Ok(result.map(Some).map_err(RocksDbStoreError::CBor)?);
+            }
+
+            Ok(None)
+        })
+        .await?
+    }
+
+    async fn delete<K: Into<[u8; 8]> + Send + 'static>(
+        &self,
+        key: K,
+        cf: &'static str,
+    ) -> Result<(), FileStoreError> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            db.delete_cf(get_cf(&db, cf)?, key.into())
+                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+
+            Ok(())
+        })
+        .await?
+    }
+
     fn stream_all<R: Iterable>(
         &self,
         cf: &'static str,
@@ -123,62 +164,21 @@ fn get_cf<'a>(db: &'a Arc<DB>, x: &str) -> Result<&'a ColumnFamily, FileStoreErr
 
 #[async_trait]
 impl Store for RocksDBStore {
-    fn stream_published_files(
-        &self,
-    ) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>> {
-        self.stream_all(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-    }
-
-    fn stream_pending_downloads(
-        &self,
-    ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>> {
-        self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
-    }
-
-    async fn get_pending_download(
-        &self,
-        key: PublishedFileKey,
-    ) -> Result<Option<PendingDownloadRecord>, FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let option = db
-                .get_cf(get_cf(&db, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)?, key.0)
-                .map_err(RocksDbStoreError::RocksDb)?;
-
-            if let Some(record) = option {
-                let result: Result<PendingDownloadRecord, serde_cbor::Error> = record.try_into();
-                return Ok(result.map(Some).map_err(RocksDbStoreError::CBor)?);
-            }
-
-            Ok(None)
-        })
-        .await?
+    async fn put_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
+        self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
     async fn get_published_file(
         &self,
         key: PublishedFileKey,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let option = db
-                .get_cf(get_cf(&db, PUBLISHED_FILES_COLUMN_FAMILY_NAME)?, key.0)
-                .map_err(RocksDbStoreError::RocksDb)?;
-
-            if let Some(record) = option {
-                let result: Result<PublishedFileRecord, serde_cbor::Error> = record.try_into();
-                return Ok(result.map(Some).map_err(RocksDbStoreError::CBor)?);
-            }
-
-            Ok(None)
-        })
-        .await?
+        self.get(key, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
-    async fn put_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
-        self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
+    fn stream_published_files(
+        &self,
+    ) -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>> {
+        self.stream_all(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
     }
 
     async fn put_pending_download(
@@ -188,11 +188,36 @@ impl Store for RocksDBStore {
         self.put(record, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 
+    async fn get_pending_download(
+        &self,
+        key: PublishedFileKey,
+    ) -> Result<Option<PendingDownloadRecord>, FileStoreError> {
+        self.get(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
+    }
+
+    async fn delete_pending_download(&self, key: PublishedFileKey) -> Result<(), FileStoreError> {
+        self.delete(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
+    }
+
+    fn stream_pending_downloads(
+        &self,
+    ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>> {
+        self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
+    }
+
     async fn put_file_processing_result(
         &self,
         record: FileProcessingResult,
     ) -> Result<(), FileStoreError> {
         self.put(record, JOBS_COLUMN_FAMILY_NAME).await
+    }
+
+    async fn delete_file_processing_result(
+        &self,
+        file_processing_result_key: [u8; 8],
+    ) -> Result<(), FileStoreError> {
+        self.delete(file_processing_result_key, JOBS_COLUMN_FAMILY_NAME)
+            .await
     }
 
     async fn get_next_file_processing_result(
@@ -229,23 +254,5 @@ impl Store for RocksDBStore {
                 Err(error) => return Err(error),
             }
         }
-    }
-
-    async fn delete_file_processing_result(
-        &self,
-        file_processing_result_key: [u8; 8],
-    ) -> Result<(), FileStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            db.delete_cf(
-                get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?,
-                file_processing_result_key,
-            )
-            .map_err(|e| RocksDbStoreError::RocksDb(e))?;
-
-            Ok(())
-        })
-        .await?
     }
 }

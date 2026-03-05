@@ -1,14 +1,13 @@
 use crate::app::file_processing::errors::FileProcessingError;
-use crate::app::file_store::domain::PublishedFileKey;
-use crate::app::utils::save_metadata;
+use crate::app::file_store::domain::{PendingDownloadRecord, PublishedFileKey};
+use crate::app::utils::{save_metadata, METADATA_FILE_NAME};
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleTree};
 use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 
@@ -75,7 +74,7 @@ pub async fn process_file(
         return Err(FileProcessingError::FileAccess("Not a file".to_owned()));
     }
 
-    let file = File::open(file_path).await?;
+    let file = tokio::fs::File::open(file_path).await?;
 
     let original_file_path = file_path;
     let file_path = PathBuf::from(original_file_path);
@@ -117,7 +116,10 @@ pub async fn process_file(
     Ok(save_metadata(file_split_result).await?)
 }
 
-async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FileProcessingError> {
+async fn split(
+    file: tokio::fs::File,
+    pieces_dir: &PathBuf,
+) -> Result<Vec<[u8; 32]>, FileProcessingError> {
     const CHUNK_SIZE: usize = 1024 * 1024; // 1mb
     let mut heap_buffer = vec![0u8; CHUNK_SIZE];
 
@@ -150,4 +152,49 @@ async fn split(file: File, pieces_dir: &PathBuf) -> Result<Vec<[u8; 32]>, FilePr
     }
 
     Ok(merkle_tree_leaves)
+}
+
+pub async fn restore_original_file(
+    pending_download_record: &PendingDownloadRecord,
+) -> Result<FileProcessingResult, FileProcessingError> {
+    let file_processing_result: FileProcessingResult = tokio::fs::read(
+        pending_download_record
+            .download_path
+            .join(METADATA_FILE_NAME),
+    )
+    .await?
+    .try_into()?;
+
+    let parent_dir = file_processing_result.target_dir.parent().ok_or_else(|| {
+        FileProcessingError::FileAccess(format!(
+            "cannot get parent dir: {}",
+            &file_processing_result.target_dir.display()
+        ))
+    })?;
+
+    let file_path = parent_dir.join(&file_processing_result.original_file_name);
+
+    if tokio::fs::try_exists(&file_path).await? {
+        let metadata = tokio::fs::metadata(&file_path).await?;
+        if !metadata.is_file() {
+            return Err(FileProcessingError::FileAccess(format!(
+                "already exists but not a file: {}",
+                file_path.display()
+            )));
+        }
+        return Ok(file_processing_result);
+    }
+
+    let file = tokio::fs::File::create(&file_path).await?;
+    let mut buf_writer = tokio::io::BufWriter::new(file);
+    for chunk in 0..file_processing_result.total_chunks {
+        let chunk_bytes = tokio::fs::read(file_processing_result.target_dir.join(format!(
+            "{}.{}",
+            chunk, file_processing_result.chunk_file_extension
+        )))
+        .await?;
+        buf_writer.write(&chunk_bytes).await?;
+    }
+
+    Ok(file_processing_result)
 }

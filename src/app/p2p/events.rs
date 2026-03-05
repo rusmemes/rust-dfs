@@ -1,4 +1,4 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::{restore_original_file, FileProcessingResult};
 use crate::app::file_store::domain::{
     PendingDownloadRecord, PublishedFileKey, PublishedFileRecord,
 };
@@ -24,6 +24,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -222,7 +223,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    pub async fn work_on_pending_downloads(&mut self) {
+    pub async fn work_on_pending_downloads(&mut self, tx: Sender<FileProcessingResult>) {
         if self.active_downloads_semaphore.available_permits() == 0 {
             info!(target: LOG_TARGET, "no download permits available");
             return;
@@ -245,21 +246,27 @@ impl<S: FileStore> EventService<S> {
                         let semaphore = self.active_downloads_semaphore.clone();
                         let store = self.store.clone();
                         let command_tx = self.commands_tx.clone();
-
+                        let sender = tx.clone();
                         tokio::spawn(async move {
                             match Self::download(
                                 &mut pending_download_record,
                                 semaphore,
-                                store,
+                                store.clone(),
                                 command_tx,
                             )
                             .await
                             {
                                 Ok(completed) => {
                                     if completed {
-                                        // todo!(
-                                        //     "restore original file, remove from pending downloads and start providing the downloaded data"
-                                        // );
+                                        if let Err(error) = Self::process_completed(
+                                            store,
+                                            &mut pending_download_record,
+                                            sender,
+                                        )
+                                        .await
+                                        {
+                                            error!(target: LOG_TARGET, "failed to complete download: {}", error);
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -278,6 +285,27 @@ impl<S: FileStore> EventService<S> {
                 }
             }
         }
+    }
+
+    async fn process_completed<FS: FileStore>(
+        store: FS,
+        pending_download_record: &mut PendingDownloadRecord,
+        sender: Sender<FileProcessingResult>,
+    ) -> anyhow::Result<()> {
+        let file_processing_result = restore_original_file(&pending_download_record).await?;
+        store
+            .put_published_file(PublishedFileRecord {
+                key: pending_download_record.key.clone(),
+                original_file_name: pending_download_record.original_file_name.clone(),
+                target_dir: pending_download_record.download_path.clone(),
+                public: file_processing_result.public,
+            })
+            .await?;
+        store
+            .delete_pending_download(pending_download_record.key.clone())
+            .await?;
+        sender.send(file_processing_result).await?;
+        Ok(())
     }
 
     pub async fn handle_command(
@@ -315,7 +343,19 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn provide(
+    pub async fn provide(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        file_processing_result: Option<FileProcessingResult>,
+    ) {
+        if let Some(file_processing_result) = file_processing_result {
+            if let Err(error) = self.provide_(swarm, &file_processing_result).await {
+                error!(target: LOG_TARGET, "failed to provide file processing result: {}", error);
+            }
+        }
+    }
+
+    async fn provide_(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         file_processing_result: &FileProcessingResult,
@@ -352,7 +392,7 @@ impl<S: FileStore> EventService<S> {
             let published_file = result?;
             let metadata_buf = published_file.target_dir.join(METADATA_FILE_NAME);
             match tokio::fs::read(metadata_buf).await {
-                Ok(data) => self.provide(swarm, &data.try_into()?).await?,
+                Ok(data) => self.provide_(swarm, &data.try_into()?).await?,
                 Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
             };
         }
@@ -367,7 +407,7 @@ impl<S: FileStore> EventService<S> {
     ) {
         match result {
             Ok(file_processing_result) => {
-                while let Err(error) = self.provide(swarm, &file_processing_result).await {
+                while let Err(error) = self.provide_(swarm, &file_processing_result).await {
                     error!(target: LOG_TARGET, "Error providing file: {}", error);
                     sleep(Duration::from_secs(1)).await
                 }
