@@ -115,6 +115,29 @@ impl RocksDBStore {
         .await?
     }
 
+    async fn exists(
+        &self,
+        key: PublishedFileKey,
+        cf: &'static str,
+    ) -> Result<bool, FileStoreError> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let cf_handle = get_cf(&db, cf)?;
+
+            if !db.key_may_exist_cf(cf_handle, &key.0) {
+                return Ok(false);
+            }
+
+            let result = db
+                .get_pinned_cf(cf_handle, &key.0)
+                .map_err(|e| RocksDbStoreError::RocksDb(e))?;
+
+            Ok(result.is_some())
+        })
+        .await?
+    }
+
     fn stream_all<R: Iterable>(
         &self,
         cf: &'static str,
@@ -173,6 +196,10 @@ impl Store for RocksDBStore {
         key: PublishedFileKey,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
         self.get(key, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
+    }
+
+    async fn pending_download_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
+        self.exists(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 
     fn stream_published_files(

@@ -86,7 +86,14 @@ where
             file_processing_result.ok_or_else(|| Status::new(Code::Internal, "missing file"))?;
 
         let file_path = download_path.join(&file_processing_result.original_file_name);
-        if tokio::fs::try_exists(&file_path).await? {
+
+        if tokio::fs::try_exists(&file_path).await?
+            || self
+                .store
+                .pending_download_exists(file_processing_result.key().into())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+        {
             return Err(Status::already_exists(file_path.to_string_lossy()));
         }
 
