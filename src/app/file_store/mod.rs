@@ -20,7 +20,7 @@ pub trait Store {
         &self,
         key: PublishedFileKey,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError>;
-    async fn pending_download_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError>;
+    async fn published_file_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError>;
     fn stream_published_files(&self)
     -> ReceiverStream<Result<PublishedFileRecord, FileStoreError>>;
     async fn put_pending_download(
@@ -31,6 +31,7 @@ pub trait Store {
         &self,
         key: PublishedFileKey,
     ) -> Result<Option<PendingDownloadRecord>, FileStoreError>;
+    async fn pending_download_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError>;
     async fn delete_pending_download(&self, key: PublishedFileKey) -> Result<(), FileStoreError>;
     fn stream_pending_downloads(
         &self,

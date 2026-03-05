@@ -9,7 +9,7 @@ use crate::app::p2p::domain::{
     P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::utils::METADATA_FILE_NAME;
+use crate::app::utils::{choose_random, METADATA_FILE_NAME};
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -39,7 +39,7 @@ pub struct EventService<S: FileStore> {
     store: S,
     metadata_providers_requests:
         HashMap<QueryId, ProvidersRequestData<MetadataFileRequest, FileMetadata>>,
-    file_providers_requests: HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
+    file_chunk_providers_requests: HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
     metadata_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileMetadata>>>,
     file_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileResponse>>>,
 }
@@ -49,7 +49,7 @@ impl<S: FileStore> EventService<S> {
         Self {
             store,
             metadata_providers_requests: HashMap::new(),
-            file_providers_requests: HashMap::new(),
+            file_chunk_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
             file_download_requests: HashMap::new(),
         }
@@ -75,10 +75,19 @@ impl<S: FileStore> EventService<S> {
                 );
             }
             P2pCommand::RequestFileChunk { request, result } => {
-                let key: PublishedFileKey = request.file_id.into();
-                let key = RecordKey::new(&key.0);
+                let key_bytes = match serde_cbor::to_vec(&request) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        error!(target: LOG_TARGET, "Error serializing file chunk request: {:?}", error);
+                        if let Err(error) = result.send(None) {
+                            error!(target: LOG_TARGET, "Error sending file chunk file response: {:?}", error);
+                        }
+                        return;
+                    }
+                };
+                let key = RecordKey::new(&key_bytes);
                 let query_id = swarm.behaviour_mut().kademlia.get_providers(key);
-                self.file_providers_requests.insert(
+                self.file_chunk_providers_requests.insert(
                     query_id,
                     ProvidersRequestData {
                         found_providers: HashSet::new(),
@@ -87,22 +96,20 @@ impl<S: FileStore> EventService<S> {
                     },
                 );
             }
-        }
-    }
-
-    pub async fn provide(
-        &mut self,
-        swarm: &mut Swarm<P2pNetworkBehaviour>,
-        metadata: Option<FileMetadata>,
-    ) {
-        if let Some(metadata) = metadata {
-            if let Err(error) = self.provide_(swarm, &metadata).await {
-                error!(target: LOG_TARGET, "failed to provide file processing result: {}", error);
+            P2pCommand::ProvideMetadata(metadata) => {
+                if let Err(error) = self.provide_metadata(swarm, &metadata).await {
+                    error!(target: LOG_TARGET, "failed to provide metadata: {}", error);
+                }
+            }
+            P2pCommand::ProvideFileChunk(request) => {
+                if let Err(error) = self.provide_file_chunk(swarm, &request).await {
+                    error!(target: LOG_TARGET, "failed to provide file chunk: {}", error);
+                }
             }
         }
     }
 
-    async fn provide_(
+    async fn provide_metadata(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         metadata: &FileMetadata,
@@ -129,6 +136,40 @@ impl<S: FileStore> EventService<S> {
         Ok(())
     }
 
+    async fn provide_file_chunk(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        file_chunk: &FileChunkRequest,
+    ) -> Result<(), P2pNetworkError> {
+        let value = serde_cbor::to_vec(file_chunk)?;
+
+        let record = Record::new(value.to_vec(), value);
+        let record_key = record.key.clone();
+
+        swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::Majority)?;
+
+        swarm.behaviour_mut().kademlia.start_providing(record_key)?;
+
+        Ok(())
+    }
+
+    async fn provide_all(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        metadata: &FileMetadata,
+    ) -> Result<(), P2pNetworkError> {
+        self.provide_metadata(swarm, metadata).await?;
+        let file_id: u64 = u64::from(PublishedFileKey(metadata.key().clone()));
+        for chunk_id in 0..metadata.total_chunks {
+            self.provide_file_chunk(swarm, &FileChunkRequest { file_id, chunk_id })
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn provide_all_published_files(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
@@ -139,7 +180,7 @@ impl<S: FileStore> EventService<S> {
             let published_file = result?;
             let metadata_buf = published_file.chunks_dir.join(METADATA_FILE_NAME);
             match tokio::fs::read(metadata_buf).await {
-                Ok(data) => self.provide_(swarm, &data.try_into()?).await?,
+                Ok(data) => self.provide_all(swarm, &data.try_into()?).await?,
                 Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
             };
         }
@@ -154,7 +195,7 @@ impl<S: FileStore> EventService<S> {
     ) {
         match result {
             Ok(metadata) => {
-                while let Err(error) = self.provide_(swarm, &metadata).await {
+                while let Err(error) = self.provide_all(swarm, &metadata).await {
                     error!(target: LOG_TARGET, "Error providing file: {}", error);
                     sleep(Duration::from_secs(1)).await
                 }
@@ -262,7 +303,7 @@ impl<S: FileStore> EventService<S> {
                 } => {
                     if let Some(data) = self.metadata_providers_requests.get_mut(&id) {
                         data.found_providers.extend(providers)
-                    } else if let Some(data) = self.file_providers_requests.get_mut(&id) {
+                    } else if let Some(data) = self.file_chunk_providers_requests.get_mut(&id) {
                         data.found_providers.extend(providers)
                     }
                 }
@@ -283,7 +324,7 @@ impl<S: FileStore> EventService<S> {
         id: &QueryId,
     ) {
         if let Some(data) = self.metadata_providers_requests.remove(&id) {
-            if let Some(peer) = data.found_providers.iter().next() {
+            if let Some(peer) = choose_random(&data.found_providers) {
                 let request_id = swarm
                     .behaviour_mut()
                     .metadata_download
@@ -294,8 +335,8 @@ impl<S: FileStore> EventService<S> {
             } else if let Err(result) = data.result.send(None) {
                 error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
             }
-        } else if let Some(data) = self.file_providers_requests.remove(&id) {
-            if let Some(peer) = data.found_providers.iter().next() {
+        } else if let Some(data) = self.file_chunk_providers_requests.remove(&id) {
+            if let Some(peer) = choose_random(&data.found_providers) {
                 let request_id = swarm
                     .behaviour_mut()
                     .file_download

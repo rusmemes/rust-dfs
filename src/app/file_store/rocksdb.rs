@@ -200,8 +200,8 @@ impl Store for RocksDBStore {
         self.get(key, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
-    async fn pending_download_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
-        self.exists(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
+    async fn published_file_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
+        self.exists(key, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
     fn stream_published_files(
@@ -222,6 +222,10 @@ impl Store for RocksDBStore {
         key: PublishedFileKey,
     ) -> Result<Option<PendingDownloadRecord>, FileStoreError> {
         self.get(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
+    }
+
+    async fn pending_download_exists(&self, key: PublishedFileKey) -> Result<bool, FileStoreError> {
+        self.exists(key, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 
     async fn delete_pending_download(&self, key: PublishedFileKey) -> Result<(), FileStoreError> {

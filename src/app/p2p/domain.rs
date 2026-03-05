@@ -34,6 +34,8 @@ pub enum P2pCommand {
         request: FileChunkRequest,
         result: oneshot::Sender<Option<FileResponse>>,
     },
+    ProvideMetadata(FileMetadata),
+    ProvideFileChunk(FileChunkRequest),
 }
 
 #[derive(NetworkBehaviour)]

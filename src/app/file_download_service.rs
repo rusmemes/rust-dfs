@@ -32,7 +32,7 @@ impl<S: FileStore> FileDownloadService<S> {
         }
     }
 
-    pub async fn work_on_pending_downloads(&mut self, tx: mpsc::Sender<FileMetadata>) {
+    pub async fn work_on_pending_downloads(&mut self, tx: mpsc::Sender<P2pCommand>) {
         if self.active_downloads_semaphore.available_permits() == 0 {
             info!(target: LOG_TARGET, "no download permits available");
             return;
@@ -102,13 +102,10 @@ impl<S: FileStore> FileDownloadService<S> {
         store: FS,
         commands_tx: mpsc::Sender<P2pCommand>,
     ) -> anyhow::Result<bool> {
-        let metadata: FileMetadata = tokio::fs::read(
-            pending_download_record
-                .chunks_dir
-                .join(METADATA_FILE_NAME),
-        )
-        .await?
-        .try_into()?;
+        let metadata: FileMetadata =
+            tokio::fs::read(pending_download_record.chunks_dir.join(METADATA_FILE_NAME))
+                .await?
+                .try_into()?;
 
         let mut join_set = JoinSet::new();
         for chunk_id in 0..metadata.merkle_proofs.len() {
@@ -136,6 +133,8 @@ impl<S: FileStore> FileDownloadService<S> {
                 result
             }));
         }
+
+        drop(commands_tx);
 
         let mut first_error = None;
         while let Some(result) = join_set.join_next().await {
@@ -179,10 +178,9 @@ impl<S: FileStore> FileDownloadService<S> {
             }
         }
 
-        first_error
-            .map(Err)
-            .unwrap_or(Ok(pending_download_record.downloaded_chunks.len()
-                == metadata.merkle_proofs.len()))
+        first_error.map(Err).unwrap_or(Ok(
+            pending_download_record.downloaded_chunks.len() == metadata.merkle_proofs.len()
+        ))
     }
 
     async fn download_file_chunk(
@@ -204,7 +202,18 @@ impl<S: FileStore> FileDownloadService<S> {
         Ok(match rx.await? {
             Some(FileResponse::Success(bytes)) => {
                 Self::verify_and_save_file_chunk(&download_file_chunk, bytes).await?;
-                Some(download_file_chunk.chunk_id)
+                if let Err(error) = commands_tx
+                    .send(P2pCommand::ProvideFileChunk(FileChunkRequest {
+                        file_id: download_file_chunk.file_id,
+                        chunk_id: download_file_chunk.chunk_id,
+                    }))
+                    .await
+                {
+                    error!(target: LOG_TARGET, "failed to send file chunk providing command: {}", error);
+                    None
+                } else {
+                    Some(download_file_chunk.chunk_id)
+                }
             }
             Some(FileResponse::Error(err)) => {
                 error!(target: LOG_TARGET, "failed to download chunk: {}", err);
@@ -246,8 +255,6 @@ impl<S: FileStore> FileDownloadService<S> {
             )
             .await?;
 
-            // TODO: start providing ???
-
             Ok(())
         } else {
             Err(anyhow::anyhow!("downloaded chunk is not correct"))
@@ -257,7 +264,7 @@ impl<S: FileStore> FileDownloadService<S> {
     async fn process_completed<FS: FileStore>(
         store: FS,
         pending_download_record: &mut PendingDownloadRecord,
-        sender: mpsc::Sender<FileMetadata>,
+        sender: mpsc::Sender<P2pCommand>,
     ) -> anyhow::Result<()> {
         let metadata = restore_original_file(&pending_download_record).await?;
         store
@@ -271,7 +278,7 @@ impl<S: FileStore> FileDownloadService<S> {
         store
             .delete_pending_download(pending_download_record.key.clone())
             .await?;
-        sender.send(metadata).await?;
+        sender.send(P2pCommand::ProvideMetadata(metadata)).await?;
         Ok(())
     }
 }

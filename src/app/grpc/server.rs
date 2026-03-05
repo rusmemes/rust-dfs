@@ -58,6 +58,31 @@ where
     ) -> Result<Response<DownloadFileResponse>, Status> {
         let request = request.into_inner();
 
+        let key: PublishedFileKey = request.file_id.into();
+        if self
+            .store
+            .published_file_exists(key.clone())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::already_exists(format!(
+                "file {} is already provided",
+                request.file_id
+            )));
+        }
+
+        if self
+            .store
+            .pending_download_exists(key)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::already_exists(format!(
+                "file {} is getting downloaded now",
+                request.file_id
+            )));
+        }
+
         let download_path = PathBuf::from(request.download_path);
 
         ensure_dir_exists_or_create(&download_path)
@@ -80,36 +105,23 @@ where
 
         let metadata = rx
             .await
-            .map_err(|_| Status::new(Code::Internal, "failed to receive response"))?;
+            .map_err(|_| Status::new(Code::Internal, "failed to receive metadata response"))?;
 
-        let metadata =
-            metadata.ok_or_else(|| Status::new(Code::Internal, "missing file"))?;
+        let metadata = metadata.ok_or_else(|| Status::new(Code::Internal, "missing metadata file"))?;
 
         let file_path = download_path.join(&metadata.original_file_name);
 
-        if tokio::fs::try_exists(&file_path).await?
-            || self
-                .store
-                .pending_download_exists(metadata.key().into())
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-        {
+        if tokio::fs::try_exists(&file_path).await? {
             return Err(Status::already_exists(file_path.to_string_lossy()));
         }
 
-        let chunks_dir = download_path.join(format!(
-            "{}_chunks",
-            metadata.get_chunks_dir_name()
-        ));
+        let chunks_dir = download_path.join(format!("{}_chunks", metadata.get_chunks_dir_name_prefix()));
 
         ensure_dir_exists_or_create(&chunks_dir)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let metadata = FileMetadata {
-            chunks_dir,
-            ..metadata
-        };
+        let metadata = FileMetadata { chunks_dir, ..metadata };
 
         let pending_download = PendingDownloadRecord::new(
             metadata.key().into(),
@@ -117,9 +129,14 @@ where
             metadata.chunks_dir.clone(),
         );
 
-        save_metadata(metadata)
+        save_metadata(metadata.clone())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        self.command_sender
+            .send(P2pCommand::ProvideMetadata(metadata))
+            .await
+            .map_err(|_| Status::new(Code::Internal, "failed to provide metadata"))?;
 
         self.store
             .put_pending_download(pending_download)

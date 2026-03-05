@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileMetadata {
     pub original_file_name: String,
     pub total_chunks: usize,
@@ -29,7 +29,7 @@ impl FileMetadata {
         hasher.finish().to_be_bytes()
     }
 
-    pub fn get_chunks_dir_name(&self) -> String {
+    pub fn get_chunks_dir_name_prefix(&self) -> String {
         self.original_file_name.replace(".", "_")
     }
 }

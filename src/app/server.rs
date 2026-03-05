@@ -42,7 +42,7 @@ impl Server {
         let store = RocksDBStore::new(self.cli.base_path.join("file_store")).await?;
 
         // p2p commands channel
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(100);
 
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()

@@ -1,7 +1,9 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use crate::app::file_processing::processing::FileMetadata;
+use rand::RngExt;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleProof};
+use std::collections::HashSet;
 use std::io::{BufWriter, ErrorKind};
 use std::path::PathBuf;
 
@@ -47,4 +49,16 @@ pub fn verify_chunk(
     let leaf = Sha256::hash(chunk);
     let proof = MerkleProof::<Sha256>::from_bytes(proof_bytes).unwrap();
     proof.verify(root, &[index], &[leaf], total_leaves)
+}
+
+pub fn choose_random<T>(set: &HashSet<T>) -> Option<&T> {
+    if set.len() == 1 {
+        set.iter().next()
+    } else if !set.is_empty() {
+        let mut rng = rand::rng();
+        let i = rng.random_range(0..set.len());
+        set.iter().nth(i)
+    } else {
+        None
+    }
 }
