@@ -1,4 +1,4 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::FileMetadata;
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response::cbor;
 use libp2p::swarm::NetworkBehaviour;
@@ -28,7 +28,7 @@ pub enum FileResponse {
 pub enum P2pCommand {
     RequestMetadata {
         request: MetadataFileRequest,
-        result: oneshot::Sender<Option<FileProcessingResult>>,
+        result: oneshot::Sender<Option<FileMetadata>>,
     },
     RequestFileChunk {
         request: FileChunkRequest,

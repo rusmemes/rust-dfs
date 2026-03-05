@@ -1,4 +1,4 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::FileMetadata;
 use crate::app::file_store::domain::{Iterable, PendingDownloadRecord, Persistable};
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::{PublishedFileKey, PublishedFileRecord, Store};
@@ -14,7 +14,7 @@ use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
 const PENDING_DOWNLOADS_COLUMN_FAMILY_NAME: &str = "pending_downloads";
-const JOBS_COLUMN_FAMILY_NAME: &str = "jobs";
+const FILE_METADATA_COLUMN_FAMILY_NAME: &str = "jobs";
 
 #[derive(Clone)]
 pub struct RocksDBStore {
@@ -44,7 +44,7 @@ impl RocksDBStore {
 
             let published_files =
                 ColumnFamilyDescriptor::new(PUBLISHED_FILES_COLUMN_FAMILY_NAME, opts.clone());
-            let jobs = ColumnFamilyDescriptor::new(JOBS_COLUMN_FAMILY_NAME, opts.clone());
+            let jobs = ColumnFamilyDescriptor::new(FILE_METADATA_COLUMN_FAMILY_NAME, opts.clone());
             let pending_downloads =
                 ColumnFamilyDescriptor::new(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME, opts.clone());
 
@@ -234,31 +234,29 @@ impl Store for RocksDBStore {
         self.stream_all(PENDING_DOWNLOADS_COLUMN_FAMILY_NAME)
     }
 
-    async fn put_file_processing_result(
-        &self,
-        record: FileProcessingResult,
-    ) -> Result<(), FileStoreError> {
-        self.put(record, JOBS_COLUMN_FAMILY_NAME).await
+    async fn put_file_metadata(&self, record: FileMetadata) -> Result<(), FileStoreError> {
+        self.put(record, FILE_METADATA_COLUMN_FAMILY_NAME).await
     }
 
-    async fn delete_file_processing_result(
+    async fn delete_file_metadata(
         &self,
         file_processing_result_key: [u8; 8],
     ) -> Result<(), FileStoreError> {
-        self.delete(file_processing_result_key, JOBS_COLUMN_FAMILY_NAME)
+        self.delete(file_processing_result_key, FILE_METADATA_COLUMN_FAMILY_NAME)
             .await
     }
 
-    async fn get_next_file_processing_result(
-        &self,
-    ) -> Result<FileProcessingResult, FileStoreError> {
+    async fn get_next_file_metadata(&self) -> Result<FileMetadata, FileStoreError> {
         loop {
             let db = self.db.clone();
 
-            let result: Result<Option<FileProcessingResult>, FileStoreError> =
+            let result: Result<Option<FileMetadata>, FileStoreError> =
                 tokio::task::spawn_blocking(move || {
                     match db
-                        .iterator_cf(get_cf(&db, JOBS_COLUMN_FAMILY_NAME)?, IteratorMode::Start)
+                        .iterator_cf(
+                            get_cf(&db, FILE_METADATA_COLUMN_FAMILY_NAME)?,
+                            IteratorMode::Start,
+                        )
                         .next()
                     {
                         Some(Ok((_, value))) => {

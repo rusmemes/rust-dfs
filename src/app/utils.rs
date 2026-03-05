@@ -1,5 +1,5 @@
 use crate::app::file_processing::errors::FileProcessingError;
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::FileMetadata;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher as MerkleHasher, MerkleProof};
 use std::io::{BufWriter, ErrorKind};
@@ -21,16 +21,16 @@ pub async fn ensure_dir_exists_or_create(path_buf: &PathBuf) -> Result<(), std::
 }
 
 pub async fn save_metadata(
-    result: FileProcessingResult,
-) -> Result<FileProcessingResult, FileProcessingError> {
+    result: FileMetadata,
+) -> Result<FileMetadata, FileProcessingError> {
     tokio::task::spawn_blocking(move || save_blocking(result)).await?
 }
 
 pub const METADATA_FILE_NAME: &str = "files.cbor";
 
 fn save_blocking(
-    result: FileProcessingResult,
-) -> Result<FileProcessingResult, FileProcessingError> {
+    result: FileMetadata,
+) -> Result<FileMetadata, FileProcessingError> {
     let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
     let writer = BufWriter::new(file);
     serde_cbor::to_writer(writer, &result)?;

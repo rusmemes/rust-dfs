@@ -1,15 +1,15 @@
-use crate::app::file_processing::processing::{restore_original_file, FileProcessingResult};
+use crate::app::file_processing::processing::FileMetadata;
 use crate::app::file_store::domain::{
     PendingDownloadRecord, PublishedFileKey, PublishedFileRecord,
 };
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::FileStore;
 use crate::app::p2p::domain::{
-    DownloadFileChunk, FileChunkRequest, FileResponse, MetadataFileRequest, P2pCommand,
-    P2pNetworkBehaviour, P2pNetworkBehaviourEvent, PublishedFile,
+    FileChunkRequest, FileResponse, MetadataFileRequest, P2pCommand, P2pNetworkBehaviour,
+    P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::utils::{verify_chunk, METADATA_FILE_NAME};
+use crate::app::utils::METADATA_FILE_NAME;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -22,15 +22,13 @@ use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
-use tokio::task::JoinSet;
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-pub struct ProvidersRequestData<Req, Res> {
+struct ProvidersRequestData<Req, Res> {
     found_providers: HashSet<PeerId>,
     request: Req,
     result: oneshot::Sender<Option<Res>>,
@@ -39,272 +37,22 @@ pub struct ProvidersRequestData<Req, Res> {
 // possible a memory leak for maps caching queries and requests data
 pub struct EventService<S: FileStore> {
     store: S,
-    commands_tx: mpsc::Sender<P2pCommand>,
     metadata_providers_requests:
-        HashMap<QueryId, ProvidersRequestData<MetadataFileRequest, FileProcessingResult>>,
+        HashMap<QueryId, ProvidersRequestData<MetadataFileRequest, FileMetadata>>,
     file_providers_requests: HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
-    metadata_download_requests:
-        HashMap<OutboundRequestId, oneshot::Sender<Option<FileProcessingResult>>>,
+    metadata_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileMetadata>>>,
     file_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileResponse>>>,
-    active_downloads: Arc<Mutex<HashSet<PublishedFileKey>>>,
-    active_downloads_semaphore: Arc<Semaphore>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(store: S, max_active_downloads: u16, commands_tx: mpsc::Sender<P2pCommand>) -> Self {
+    pub fn new(store: S) -> Self {
         Self {
             store,
-            commands_tx,
             metadata_providers_requests: HashMap::new(),
             file_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
             file_download_requests: HashMap::new(),
-            active_downloads: Arc::new(Mutex::new(HashSet::new())),
-            active_downloads_semaphore: Arc::new(Semaphore::new(max_active_downloads as usize)),
         }
-    }
-
-    async fn download<FS: FileStore>(
-        pending_download_record: &mut PendingDownloadRecord,
-        semaphore: Arc<Semaphore>,
-        store: FS,
-        commands_tx: mpsc::Sender<P2pCommand>,
-    ) -> anyhow::Result<bool> {
-        let file_processing_result: FileProcessingResult = tokio::fs::read(
-            pending_download_record
-                .download_path
-                .join(METADATA_FILE_NAME),
-        )
-        .await?
-        .try_into()?;
-
-        let mut join_set = JoinSet::new();
-        for chunk_id in 0..file_processing_result.merkle_proofs.len() {
-            if pending_download_record
-                .downloaded_chunks
-                .contains(&chunk_id)
-            {
-                continue;
-            }
-
-            let download_file_chunk = DownloadFileChunk {
-                file_id: pending_download_record.key.clone().into(),
-                chunk_id,
-                target_dir: pending_download_record.download_path.clone(),
-            };
-
-            let local_semaphore = semaphore.clone();
-            let sender = commands_tx.clone();
-
-            join_set.spawn(tokio::spawn(async move {
-                let permit = local_semaphore.acquire().await?;
-                debug!("permit acquired {:?}", permit);
-                let result = Self::download_file_chunk(download_file_chunk, sender).await;
-                debug!("permit released {:?}", permit);
-                result
-            }));
-        }
-
-        let mut first_error = None;
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(result) => match result {
-                    Ok(result) => match result {
-                        Ok(Some(chunk_id)) => {
-                            info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
-                            if pending_download_record.downloaded_chunks.insert(chunk_id) {
-                                if let Err(error) = store
-                                    .put_pending_download(pending_download_record.clone())
-                                    .await
-                                {
-                                    error!("failed to update pending download: {}", error);
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            debug!(target: LOG_TARGET, "no file chunk present");
-                        }
-                        Err(error) => {
-                            error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
-                            if first_error.is_none() {
-                                first_error = Some(error);
-                            }
-                        }
-                    },
-                    Err(error) => {
-                        error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
-                        if first_error.is_none() {
-                            first_error = Some(error.into());
-                        }
-                    }
-                },
-                Err(error) => {
-                    error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
-                    if first_error.is_none() {
-                        first_error = Some(error.into());
-                    }
-                }
-            }
-        }
-
-        first_error
-            .map(Err)
-            .unwrap_or(Ok(pending_download_record.downloaded_chunks.len()
-                == file_processing_result.merkle_proofs.len()))
-    }
-
-    async fn download_file_chunk(
-        download_file_chunk: DownloadFileChunk,
-        commands_tx: mpsc::Sender<P2pCommand>,
-    ) -> anyhow::Result<Option<usize>> {
-        let (tx, rx) = oneshot::channel();
-
-        commands_tx
-            .send(P2pCommand::RequestFileChunk {
-                request: FileChunkRequest {
-                    file_id: download_file_chunk.file_id,
-                    chunk_id: download_file_chunk.chunk_id,
-                },
-                result: tx,
-            })
-            .await?;
-
-        Ok(match rx.await? {
-            Some(FileResponse::Success(bytes)) => {
-                Self::verify_and_save_file_chunk(&download_file_chunk, bytes).await?;
-                Some(download_file_chunk.chunk_id)
-            }
-            Some(FileResponse::Error(err)) => {
-                error!(target: LOG_TARGET, "failed to download chunk: {}", err);
-                None
-            }
-            _ => None,
-        })
-    }
-
-    async fn verify_and_save_file_chunk(
-        download_file_chunk: &DownloadFileChunk,
-        bytes: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        let file_processing_result: FileProcessingResult =
-            tokio::fs::read(download_file_chunk.target_dir.join(METADATA_FILE_NAME))
-                .await?
-                .try_into()?;
-
-        let is_correct = verify_chunk(
-            &bytes,
-            download_file_chunk.chunk_id,
-            file_processing_result
-                .merkle_proofs
-                .get(download_file_chunk.chunk_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("chunk {} not found", download_file_chunk.chunk_id)
-                })?,
-            file_processing_result.merkle_root,
-            file_processing_result.total_chunks,
-        );
-
-        if is_correct {
-            tokio::fs::write(
-                download_file_chunk.target_dir.join(format!(
-                    "{}.{}",
-                    download_file_chunk.chunk_id, file_processing_result.chunk_file_extension
-                )),
-                &bytes,
-            )
-            .await?;
-
-            // TODO: start providing ???
-
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("downloaded chunk is not correct"))
-        }
-    }
-
-    pub async fn work_on_pending_downloads(&mut self, tx: mpsc::Sender<FileProcessingResult>) {
-        if self.active_downloads_semaphore.available_permits() == 0 {
-            info!(target: LOG_TARGET, "no download permits available");
-            return;
-        }
-        let mut stream = self.store.stream_pending_downloads();
-        while let Some(result) = stream.next().await {
-            if self.active_downloads_semaphore.available_permits() == 0 {
-                info!(target: LOG_TARGET, "no download permits available");
-                return;
-            }
-            match result {
-                Ok(mut pending_download_record) => {
-                    let active_downloads = self.active_downloads.clone();
-
-                    if active_downloads
-                        .lock()
-                        .await
-                        .insert(pending_download_record.key.clone())
-                    {
-                        let semaphore = self.active_downloads_semaphore.clone();
-                        let store = self.store.clone();
-                        let command_tx = self.commands_tx.clone();
-                        let sender = tx.clone();
-                        tokio::spawn(async move {
-                            match Self::download(
-                                &mut pending_download_record,
-                                semaphore,
-                                store.clone(),
-                                command_tx,
-                            )
-                            .await
-                            {
-                                Ok(completed) => {
-                                    if completed {
-                                        if let Err(error) = Self::process_completed(
-                                            store,
-                                            &mut pending_download_record,
-                                            sender,
-                                        )
-                                        .await
-                                        {
-                                            error!(target: LOG_TARGET, "failed to complete download: {}", error);
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    error!(target: LOG_TARGET, "Failed to start download: {}", error);
-                                }
-                            }
-                            active_downloads
-                                .lock()
-                                .await
-                                .remove(&pending_download_record.key);
-                        });
-                    }
-                }
-                Err(error) => {
-                    error!(target: LOG_TARGET, "Error reading from stream: {}", error);
-                }
-            }
-        }
-    }
-
-    async fn process_completed<FS: FileStore>(
-        store: FS,
-        pending_download_record: &mut PendingDownloadRecord,
-        sender: mpsc::Sender<FileProcessingResult>,
-    ) -> anyhow::Result<()> {
-        let file_processing_result = restore_original_file(&pending_download_record).await?;
-        store
-            .put_published_file(PublishedFileRecord {
-                key: pending_download_record.key.clone(),
-                original_file_name: pending_download_record.original_file_name.clone(),
-                target_dir: pending_download_record.download_path.clone(),
-                public: file_processing_result.public,
-            })
-            .await?;
-        store
-            .delete_pending_download(pending_download_record.key.clone())
-            .await?;
-        sender.send(file_processing_result).await?;
-        Ok(())
     }
 
     pub async fn handle_command(
@@ -345,7 +93,7 @@ impl<S: FileStore> EventService<S> {
     pub async fn provide(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        file_processing_result: Option<FileProcessingResult>,
+        file_processing_result: Option<FileMetadata>,
     ) {
         if let Some(file_processing_result) = file_processing_result {
             if let Err(error) = self.provide_(swarm, &file_processing_result).await {
@@ -357,7 +105,7 @@ impl<S: FileStore> EventService<S> {
     async fn provide_(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        file_processing_result: &FileProcessingResult,
+        file_processing_result: &FileMetadata,
     ) -> Result<(), P2pNetworkError> {
         let raw_key = file_processing_result.key();
 
@@ -402,7 +150,7 @@ impl<S: FileStore> EventService<S> {
     pub async fn file_publish(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        result: Result<FileProcessingResult, FileStoreError>,
+        result: Result<FileMetadata, FileStoreError>,
     ) {
         match result {
             Ok(file_processing_result) => {
@@ -422,7 +170,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn add_published_file(&mut self, file_processing_result: FileProcessingResult) {
+    async fn add_published_file(&mut self, file_processing_result: FileMetadata) {
         let published_file_record: PublishedFileRecord = file_processing_result.into();
         while let Err(error) = self
             .store
@@ -438,7 +186,7 @@ impl<S: FileStore> EventService<S> {
         loop {
             match self
                 .store
-                .delete_file_processing_result(file_processing_result_key.clone())
+                .delete_file_metadata(file_processing_result_key.clone())
                 .await
             {
                 Err(error) => {
@@ -647,11 +395,11 @@ impl<S: FileStore> EventService<S> {
     fn handle_metadata_download_response(
         &mut self,
         response: FileResponse,
-        channel: oneshot::Sender<Option<FileProcessingResult>>,
+        channel: oneshot::Sender<Option<FileMetadata>>,
     ) {
         match response {
             FileResponse::Success(data) => {
-                let result: Result<FileProcessingResult, serde_cbor::Error> = data.try_into();
+                let result: Result<FileMetadata, serde_cbor::Error> = data.try_into();
 
                 match result {
                     Ok(result) => {
@@ -743,7 +491,7 @@ impl<S: FileStore> EventService<S> {
         channel: ResponseChannel<FileResponse>,
         target_dir: PathBuf,
     ) {
-        let file_processing_result: FileProcessingResult = match tokio::fs::read(
+        let file_processing_result: FileMetadata = match tokio::fs::read(
             target_dir.join(METADATA_FILE_NAME),
         )
         .await
@@ -763,7 +511,7 @@ impl<S: FileStore> EventService<S> {
             }
         };
 
-        let FileProcessingResult {
+        let FileMetadata {
             original_file_name: _original_file_name,
             total_chunks,
             target_dir,

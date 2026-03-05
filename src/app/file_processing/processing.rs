@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FileProcessingResult {
+pub struct FileMetadata {
     pub original_file_name: String,
     pub total_chunks: usize,
     pub target_dir: PathBuf,
@@ -22,7 +22,7 @@ pub struct FileProcessingResult {
     pub public: bool,
 }
 
-impl FileProcessingResult {
+impl FileMetadata {
     pub fn key(&self) -> [u8; 8] {
         let mut hasher = Sha256Hasher::default();
         self.hash(&mut hasher);
@@ -30,7 +30,7 @@ impl FileProcessingResult {
     }
 }
 
-impl Hash for FileProcessingResult {
+impl Hash for FileMetadata {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.original_file_name.hash(state);
         self.total_chunks.hash(state);
@@ -39,7 +39,7 @@ impl Hash for FileProcessingResult {
     }
 }
 
-impl TryInto<(PublishedFileKey, Vec<u8>)> for FileProcessingResult {
+impl TryInto<(PublishedFileKey, Vec<u8>)> for FileMetadata {
     type Error = serde_cbor::Error;
 
     fn try_into(self) -> Result<(PublishedFileKey, Vec<u8>), Self::Error> {
@@ -48,7 +48,7 @@ impl TryInto<(PublishedFileKey, Vec<u8>)> for FileProcessingResult {
     }
 }
 
-impl TryFrom<Vec<u8>> for FileProcessingResult {
+impl TryFrom<Vec<u8>> for FileMetadata {
     type Error = serde_cbor::Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -56,10 +56,10 @@ impl TryFrom<Vec<u8>> for FileProcessingResult {
     }
 }
 
-impl TryFrom<FileProcessingResult> for Vec<u8> {
+impl TryFrom<FileMetadata> for Vec<u8> {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: FileProcessingResult) -> Result<Self, Self::Error> {
+    fn try_from(value: FileMetadata) -> Result<Self, Self::Error> {
         serde_cbor::to_vec(&value)
     }
 }
@@ -67,7 +67,7 @@ impl TryFrom<FileProcessingResult> for Vec<u8> {
 pub async fn process_file(
     file_path: &str,
     public: bool,
-) -> Result<FileProcessingResult, FileProcessingError> {
+) -> Result<FileMetadata, FileProcessingError> {
     let metadata = tokio::fs::metadata(file_path).await?;
 
     if !metadata.is_file() {
@@ -103,7 +103,7 @@ pub async fn process_file(
         .map(|index| merkle_tree.proof(&[index]).to_bytes())
         .collect::<Vec<_>>();
 
-    let file_split_result = FileProcessingResult {
+    let file_split_result = FileMetadata {
         original_file_name: file_name.to_string(),
         total_chunks: merkle_tree_leaves.len(),
         target_dir: pieces_dir,
@@ -156,8 +156,8 @@ async fn split(
 
 pub async fn restore_original_file(
     pending_download_record: &PendingDownloadRecord,
-) -> Result<FileProcessingResult, FileProcessingError> {
-    let file_processing_result: FileProcessingResult = tokio::fs::read(
+) -> Result<FileMetadata, FileProcessingError> {
+    let file_processing_result: FileMetadata = tokio::fs::read(
         pending_download_record
             .download_path
             .join(METADATA_FILE_NAME),

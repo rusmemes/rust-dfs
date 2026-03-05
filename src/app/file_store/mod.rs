@@ -1,4 +1,4 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::FileMetadata;
 use crate::app::file_store::domain::{
     PendingDownloadRecord, PublishedFileKey, PublishedFileRecord,
 };
@@ -35,14 +35,10 @@ pub trait Store {
     fn stream_pending_downloads(
         &self,
     ) -> ReceiverStream<Result<PendingDownloadRecord, FileStoreError>>;
-    async fn put_file_processing_result(
-        &self,
-        record: FileProcessingResult,
-    ) -> Result<(), FileStoreError>;
-    async fn delete_file_processing_result(
+    async fn put_file_metadata(&self, record: FileMetadata) -> Result<(), FileStoreError>;
+    async fn delete_file_metadata(
         &self,
         file_processing_result_key: [u8; 8],
     ) -> Result<(), FileStoreError>;
-    async fn get_next_file_processing_result(&self)
-    -> Result<FileProcessingResult, FileStoreError>;
+    async fn get_next_file_metadata(&self) -> Result<FileMetadata, FileStoreError>;
 }

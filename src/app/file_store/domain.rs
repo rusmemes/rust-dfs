@@ -1,4 +1,4 @@
-use crate::app::file_processing::processing::FileProcessingResult;
+use crate::app::file_processing::processing::FileMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -88,8 +88,8 @@ impl From<u64> for PublishedFileKey {
     }
 }
 
-impl From<FileProcessingResult> for PublishedFileRecord {
-    fn from(result: FileProcessingResult) -> Self {
+impl From<FileMetadata> for PublishedFileRecord {
+    fn from(result: FileMetadata) -> Self {
         Self {
             key: result.key().into(),
             original_file_name: result.original_file_name,

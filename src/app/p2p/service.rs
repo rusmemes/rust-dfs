@@ -4,6 +4,7 @@ use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::{P2pCommand, P2pNetworkBehaviour};
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::p2p::events::EventService;
+use crate::app::p2p::file_download_service::FileDownloadService;
 use crate::app::server::Service;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
@@ -166,7 +167,9 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService::new(
+        let mut event_service = EventService::new(self.store.clone());
+
+        let mut file_download_service = FileDownloadService::new(
             self.store.clone(),
             self.max_active_downloads,
             self.commands_tx.clone(),
@@ -178,19 +181,19 @@ impl<S: FileStore> Service for P2pService<S> {
 
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
 
-        let (tx, mut rx) = mpsc::channel(1);
+        let (file_download_command_sender, mut file_download_response_receiver) = mpsc::channel(1);
 
         loop {
             select! {
-                result = self.store.get_next_file_processing_result() => event_service.file_publish(&mut swarm, result).await,
+                result = self.store.get_next_file_metadata() => event_service.file_publish(&mut swarm, result).await,
                 event = swarm.select_next_some() => event_service.handle_swarm_event(&mut swarm, event).await,
                 command = self.commands_rx.recv() => {
                     if let Some(command) = command {
                         event_service.handle_command(&mut swarm, command).await
                     }
                 }
-                record_to_provide = rx.recv() => event_service.provide(&mut swarm, record_to_provide).await,
-                _ = ticker.tick() => event_service.work_on_pending_downloads(tx.clone()).await,
+                record_to_provide = file_download_response_receiver.recv() => event_service.provide(&mut swarm, record_to_provide).await,
+                _ = ticker.tick() => file_download_service.work_on_pending_downloads(file_download_command_sender.clone()).await,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break

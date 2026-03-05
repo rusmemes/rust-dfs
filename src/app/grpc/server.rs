@@ -1,5 +1,5 @@
 use crate::app::errors::ServerError;
-use crate::app::file_processing::processing::{process_file, FileProcessingResult};
+use crate::app::file_processing::processing::{process_file, FileMetadata};
 use crate::app::file_store::domain::{PendingDownloadRecord, PublishedFileKey};
 use crate::app::file_store::FileStore;
 use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
@@ -43,7 +43,7 @@ where
         let key: PublishedFileKey = file_split_result.key().into();
 
         self.store
-            .put_file_processing_result(file_split_result)
+            .put_file_metadata(file_split_result)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -106,7 +106,7 @@ where
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let file_processing_result = FileProcessingResult {
+        let file_processing_result = FileMetadata {
             target_dir: pieces_dir,
             ..file_processing_result
         };
