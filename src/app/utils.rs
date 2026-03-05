@@ -26,12 +26,12 @@ pub async fn save_metadata(
     tokio::task::spawn_blocking(move || save_blocking(result)).await?
 }
 
-pub const METADATA_FILE_NAME: &str = "files.cbor";
+pub const METADATA_FILE_NAME: &str = ".metadata";
 
 fn save_blocking(
     result: FileMetadata,
 ) -> Result<FileMetadata, FileProcessingError> {
-    let file = std::fs::File::create(result.target_dir.join(METADATA_FILE_NAME))?;
+    let file = std::fs::File::create(result.chunks_dir.join(METADATA_FILE_NAME))?;
     let writer = BufWriter::new(file);
     serde_cbor::to_writer(writer, &result)?;
     Ok(result)

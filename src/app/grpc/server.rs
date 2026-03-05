@@ -78,46 +78,46 @@ where
                 Status::new(Code::Internal, "failed to send P2pCommand::RequestMetadata")
             })?;
 
-        let file_processing_result = rx
+        let metadata = rx
             .await
             .map_err(|_| Status::new(Code::Internal, "failed to receive response"))?;
 
-        let file_processing_result =
-            file_processing_result.ok_or_else(|| Status::new(Code::Internal, "missing file"))?;
+        let metadata =
+            metadata.ok_or_else(|| Status::new(Code::Internal, "missing file"))?;
 
-        let file_path = download_path.join(&file_processing_result.original_file_name);
+        let file_path = download_path.join(&metadata.original_file_name);
 
         if tokio::fs::try_exists(&file_path).await?
             || self
                 .store
-                .pending_download_exists(file_processing_result.key().into())
+                .pending_download_exists(metadata.key().into())
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
         {
             return Err(Status::already_exists(file_path.to_string_lossy()));
         }
 
-        let pieces_dir = download_path.join(format!(
+        let chunks_dir = download_path.join(format!(
             "{}_chunks",
-            file_processing_result.original_file_name.replace(".", "_")
+            metadata.get_chunks_dir_name()
         ));
 
-        ensure_dir_exists_or_create(&pieces_dir)
+        ensure_dir_exists_or_create(&chunks_dir)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let file_processing_result = FileMetadata {
-            target_dir: pieces_dir,
-            ..file_processing_result
+        let metadata = FileMetadata {
+            chunks_dir,
+            ..metadata
         };
 
         let pending_download = PendingDownloadRecord::new(
-            file_processing_result.key().into(),
-            file_processing_result.original_file_name.clone(),
-            file_processing_result.target_dir.clone(),
+            metadata.key().into(),
+            metadata.original_file_name.clone(),
+            metadata.chunks_dir.clone(),
         );
 
-        save_metadata(file_processing_result)
+        save_metadata(metadata)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

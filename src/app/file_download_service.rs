@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
-const LOG_TARGET: &str = "app::p2p::file_download_service";
+const LOG_TARGET: &str = "app::file_download_service";
 
 pub struct FileDownloadService<S: FileStore> {
     active_downloads_semaphore: Arc<Semaphore>,
@@ -102,16 +102,16 @@ impl<S: FileStore> FileDownloadService<S> {
         store: FS,
         commands_tx: mpsc::Sender<P2pCommand>,
     ) -> anyhow::Result<bool> {
-        let file_processing_result: FileMetadata = tokio::fs::read(
+        let metadata: FileMetadata = tokio::fs::read(
             pending_download_record
-                .download_path
+                .chunks_dir
                 .join(METADATA_FILE_NAME),
         )
         .await?
         .try_into()?;
 
         let mut join_set = JoinSet::new();
-        for chunk_id in 0..file_processing_result.merkle_proofs.len() {
+        for chunk_id in 0..metadata.merkle_proofs.len() {
             if pending_download_record
                 .downloaded_chunks
                 .contains(&chunk_id)
@@ -122,7 +122,7 @@ impl<S: FileStore> FileDownloadService<S> {
             let download_file_chunk = DownloadFileChunk {
                 file_id: pending_download_record.key.clone().into(),
                 chunk_id,
-                target_dir: pending_download_record.download_path.clone(),
+                target_dir: pending_download_record.chunks_dir.clone(),
             };
 
             let local_semaphore = semaphore.clone();
@@ -143,7 +143,7 @@ impl<S: FileStore> FileDownloadService<S> {
                 Ok(result) => match result {
                     Ok(result) => match result {
                         Ok(Some(chunk_id)) => {
-                            info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
+                            info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &metadata.original_file_name, chunk_id);
                             if pending_download_record.downloaded_chunks.insert(chunk_id) {
                                 if let Err(error) = store
                                     .put_pending_download(pending_download_record.clone())
@@ -157,21 +157,21 @@ impl<S: FileStore> FileDownloadService<S> {
                             debug!(target: LOG_TARGET, "no file chunk present");
                         }
                         Err(error) => {
-                            error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                            error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &metadata.original_file_name, error);
                             if first_error.is_none() {
                                 first_error = Some(error);
                             }
                         }
                     },
                     Err(error) => {
-                        error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                        error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &metadata.original_file_name, error);
                         if first_error.is_none() {
                             first_error = Some(error.into());
                         }
                     }
                 },
                 Err(error) => {
-                    error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
+                    error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &metadata.original_file_name, error);
                     if first_error.is_none() {
                         first_error = Some(error.into());
                     }
@@ -182,7 +182,7 @@ impl<S: FileStore> FileDownloadService<S> {
         first_error
             .map(Err)
             .unwrap_or(Ok(pending_download_record.downloaded_chunks.len()
-                == file_processing_result.merkle_proofs.len()))
+                == metadata.merkle_proofs.len()))
     }
 
     async fn download_file_chunk(
@@ -218,7 +218,7 @@ impl<S: FileStore> FileDownloadService<S> {
         download_file_chunk: &DownloadFileChunk,
         bytes: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let file_processing_result: FileMetadata =
+        let metadata: FileMetadata =
             tokio::fs::read(download_file_chunk.target_dir.join(METADATA_FILE_NAME))
                 .await?
                 .try_into()?;
@@ -226,21 +226,21 @@ impl<S: FileStore> FileDownloadService<S> {
         let is_correct = verify_chunk(
             &bytes,
             download_file_chunk.chunk_id,
-            file_processing_result
+            metadata
                 .merkle_proofs
                 .get(download_file_chunk.chunk_id)
                 .ok_or_else(|| {
                     anyhow::anyhow!("chunk {} not found", download_file_chunk.chunk_id)
                 })?,
-            file_processing_result.merkle_root,
-            file_processing_result.total_chunks,
+            metadata.merkle_root,
+            metadata.total_chunks,
         );
 
         if is_correct {
             tokio::fs::write(
                 download_file_chunk.target_dir.join(format!(
                     "{}.{}",
-                    download_file_chunk.chunk_id, file_processing_result.chunk_file_extension
+                    download_file_chunk.chunk_id, metadata.chunk_file_extension
                 )),
                 &bytes,
             )
@@ -259,19 +259,19 @@ impl<S: FileStore> FileDownloadService<S> {
         pending_download_record: &mut PendingDownloadRecord,
         sender: mpsc::Sender<FileMetadata>,
     ) -> anyhow::Result<()> {
-        let file_processing_result = restore_original_file(&pending_download_record).await?;
+        let metadata = restore_original_file(&pending_download_record).await?;
         store
             .put_published_file(PublishedFileRecord {
                 key: pending_download_record.key.clone(),
                 original_file_name: pending_download_record.original_file_name.clone(),
-                target_dir: pending_download_record.download_path.clone(),
-                public: file_processing_result.public,
+                chunks_dir: pending_download_record.chunks_dir.clone(),
+                public: metadata.public,
             })
             .await?;
         store
             .delete_pending_download(pending_download_record.key.clone())
             .await?;
-        sender.send(file_processing_result).await?;
+        sender.send(metadata).await?;
         Ok(())
     }
 }

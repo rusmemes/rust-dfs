@@ -93,10 +93,10 @@ impl<S: FileStore> EventService<S> {
     pub async fn provide(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        file_processing_result: Option<FileMetadata>,
+        metadata: Option<FileMetadata>,
     ) {
-        if let Some(file_processing_result) = file_processing_result {
-            if let Err(error) = self.provide_(swarm, &file_processing_result).await {
+        if let Some(metadata) = metadata {
+            if let Err(error) = self.provide_(swarm, &metadata).await {
                 error!(target: LOG_TARGET, "failed to provide file processing result: {}", error);
             }
         }
@@ -105,13 +105,13 @@ impl<S: FileStore> EventService<S> {
     async fn provide_(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        file_processing_result: &FileMetadata,
+        metadata: &FileMetadata,
     ) -> Result<(), P2pNetworkError> {
-        let raw_key = file_processing_result.key();
+        let raw_key = metadata.key();
 
         let value = serde_cbor::to_vec(&PublishedFile {
-            total_chunks: file_processing_result.total_chunks,
-            merkle_root: file_processing_result.merkle_root,
+            total_chunks: metadata.total_chunks,
+            merkle_root: metadata.merkle_root,
         })?;
 
         let record = Record::new(raw_key.to_vec(), value);
@@ -137,7 +137,7 @@ impl<S: FileStore> EventService<S> {
 
         while let Some(result) = receiver_stream.next().await {
             let published_file = result?;
-            let metadata_buf = published_file.target_dir.join(METADATA_FILE_NAME);
+            let metadata_buf = published_file.chunks_dir.join(METADATA_FILE_NAME);
             match tokio::fs::read(metadata_buf).await {
                 Ok(data) => self.provide_(swarm, &data.try_into()?).await?,
                 Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
@@ -153,15 +153,15 @@ impl<S: FileStore> EventService<S> {
         result: Result<FileMetadata, FileStoreError>,
     ) {
         match result {
-            Ok(file_processing_result) => {
-                while let Err(error) = self.provide_(swarm, &file_processing_result).await {
+            Ok(metadata) => {
+                while let Err(error) = self.provide_(swarm, &metadata).await {
                     error!(target: LOG_TARGET, "Error providing file: {}", error);
                     sleep(Duration::from_secs(1)).await
                 }
 
-                let raw_key = file_processing_result.key();
-                self.add_published_file(file_processing_result).await;
-                self.delete_file_processing_result(raw_key).await;
+                let raw_key = metadata.key();
+                self.add_published_file(metadata).await;
+                self.delete_file_metadata(raw_key).await;
                 info!(target: LOG_TARGET, "Successfully published a file");
             }
             Err(error) => {
@@ -170,8 +170,8 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn add_published_file(&mut self, file_processing_result: FileMetadata) {
-        let published_file_record: PublishedFileRecord = file_processing_result.into();
+    async fn add_published_file(&mut self, metadata: FileMetadata) {
+        let published_file_record: PublishedFileRecord = metadata.into();
         while let Err(error) = self
             .store
             .put_published_file(published_file_record.clone())
@@ -182,13 +182,9 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn delete_file_processing_result(&mut self, file_processing_result_key: [u8; 8]) {
+    async fn delete_file_metadata(&mut self, metadata_key: [u8; 8]) {
         loop {
-            match self
-                .store
-                .delete_file_metadata(file_processing_result_key.clone())
-                .await
-            {
+            match self.store.delete_file_metadata(metadata_key.clone()).await {
                 Err(error) => {
                     error!(target: LOG_TARGET, "Error deleting file split record: {}", error);
                     sleep(Duration::from_secs(1)).await
@@ -334,7 +330,7 @@ impl<S: FileStore> EventService<S> {
                         Ok(Some(PublishedFileRecord {
                             key: _key,
                             original_file_name: _original_file_name,
-                            target_dir,
+                            chunks_dir: target_dir,
                             public: _public,
                         })) => match tokio::fs::read(target_dir.join(METADATA_FILE_NAME)).await {
                             Ok(data) => {
@@ -454,7 +450,7 @@ impl<S: FileStore> EventService<S> {
                             Ok(Some(PublishedFileRecord {
                                 key: _key,
                                 original_file_name: _original_file_name,
-                                target_dir,
+                                chunks_dir: target_dir,
                                 public: _public,
                             })) => {
                                 self.get_from_chunks(swarm, chunk_id, channel, target_dir)
@@ -491,13 +487,11 @@ impl<S: FileStore> EventService<S> {
         channel: ResponseChannel<FileResponse>,
         target_dir: PathBuf,
     ) {
-        let file_processing_result: FileMetadata = match tokio::fs::read(
-            target_dir.join(METADATA_FILE_NAME),
-        )
-        .await
+        let metadata: FileMetadata = match tokio::fs::read(target_dir.join(METADATA_FILE_NAME))
+            .await
         {
             Ok(bytes) => match bytes.try_into() {
-                Ok(file_processing_result) => file_processing_result,
+                Ok(metadata) => metadata,
                 Err(error) => {
                     error!(target: LOG_TARGET, "Error deserializing metadata from file: {:?}", error);
                     self.send_file_response(swarm, channel, FileResponse::Error(error.to_string()));
@@ -514,12 +508,12 @@ impl<S: FileStore> EventService<S> {
         let FileMetadata {
             original_file_name: _original_file_name,
             total_chunks,
-            target_dir,
+            chunks_dir: target_dir,
             merkle_root: _merkle_root,
             merkle_proofs: _merkle_proofs,
             chunk_file_extension,
             public: _public,
-        } = file_processing_result;
+        } = metadata;
 
         if chunk_id >= total_chunks {
             self.send_file_response(
@@ -565,7 +559,7 @@ impl<S: FileStore> EventService<S> {
             Ok(Some(PendingDownloadRecord {
                 key: _key,
                 original_file_name: _original_file_name,
-                download_path,
+                chunks_dir: download_path,
                 downloaded_chunks,
             })) => {
                 if downloaded_chunks.contains(&chunk_id) {

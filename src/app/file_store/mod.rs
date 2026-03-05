@@ -38,7 +38,7 @@ pub trait Store {
     async fn put_file_metadata(&self, record: FileMetadata) -> Result<(), FileStoreError>;
     async fn delete_file_metadata(
         &self,
-        file_processing_result_key: [u8; 8],
+        metadata_key: [u8; 8],
     ) -> Result<(), FileStoreError>;
     async fn get_next_file_metadata(&self) -> Result<FileMetadata, FileStoreError>;
 }

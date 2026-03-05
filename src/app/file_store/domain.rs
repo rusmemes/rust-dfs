@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct PublishedFileRecord {
     pub key: PublishedFileKey,
     pub original_file_name: String,
-    pub target_dir: PathBuf,
+    pub chunks_dir: PathBuf,
     pub public: bool,
 }
 
@@ -18,16 +18,16 @@ pub struct PublishedFileKey(pub [u8; 8]);
 pub struct PendingDownloadRecord {
     pub key: PublishedFileKey,
     pub original_file_name: String,
-    pub download_path: PathBuf,
+    pub chunks_dir: PathBuf,
     pub downloaded_chunks: HashSet<usize>,
 }
 
 impl PendingDownloadRecord {
-    pub fn new(key: PublishedFileKey, original_file_name: String, download_path: PathBuf) -> Self {
+    pub fn new(key: PublishedFileKey, original_file_name: String, chunks_dir: PathBuf) -> Self {
         Self {
             key,
             original_file_name,
-            download_path,
+            chunks_dir,
             downloaded_chunks: HashSet::new(),
         }
     }
@@ -93,7 +93,7 @@ impl From<FileMetadata> for PublishedFileRecord {
         Self {
             key: result.key().into(),
             original_file_name: result.original_file_name,
-            target_dir: result.target_dir,
+            chunks_dir: result.chunks_dir,
             public: result.public,
         }
     }

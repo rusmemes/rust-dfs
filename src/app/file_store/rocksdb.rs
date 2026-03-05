@@ -240,9 +240,9 @@ impl Store for RocksDBStore {
 
     async fn delete_file_metadata(
         &self,
-        file_processing_result_key: [u8; 8],
+        metadata_key: [u8; 8],
     ) -> Result<(), FileStoreError> {
-        self.delete(file_processing_result_key, FILE_METADATA_COLUMN_FAMILY_NAME)
+        self.delete(metadata_key, FILE_METADATA_COLUMN_FAMILY_NAME)
             .await
     }
 

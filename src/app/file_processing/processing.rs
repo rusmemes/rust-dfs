@@ -15,7 +15,7 @@ pub const FILE_CHUNK_EXTENSION: &str = "chunk";
 pub struct FileMetadata {
     pub original_file_name: String,
     pub total_chunks: usize,
-    pub target_dir: PathBuf,
+    pub chunks_dir: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_proofs: Vec<Vec<u8>>,
     pub chunk_file_extension: String,
@@ -27,6 +27,10 @@ impl FileMetadata {
         let mut hasher = Sha256Hasher::default();
         self.hash(&mut hasher);
         hasher.finish().to_be_bytes()
+    }
+
+    pub fn get_chunks_dir_name(&self) -> String {
+        self.original_file_name.replace(".", "_")
     }
 }
 
@@ -88,12 +92,12 @@ pub async fn process_file(
         .ok_or_else(|| FileProcessingError::FileAccess("cannot get file name".to_owned()))?
         .to_string_lossy();
 
-    let pieces_dir =
+    let chunks_dir =
         Path::new(containing_dir).join(format!("{}_chunks", file_name.replace(".", "_")));
 
-    tokio::fs::create_dir_all(&pieces_dir).await?;
+    tokio::fs::create_dir_all(&chunks_dir).await?;
 
-    let merkle_tree_leaves = split(file, &pieces_dir).await?;
+    let merkle_tree_leaves = split(file, &chunks_dir).await?;
     let merkle_tree = MerkleTree::<Sha256>::from_leaves(&merkle_tree_leaves);
     let merkle_root = merkle_tree.root().ok_or_else(|| {
         FileProcessingError::MerkleTreeCreation("cannot get merkle root".to_owned())
@@ -103,17 +107,17 @@ pub async fn process_file(
         .map(|index| merkle_tree.proof(&[index]).to_bytes())
         .collect::<Vec<_>>();
 
-    let file_split_result = FileMetadata {
+    let metadata = FileMetadata {
         original_file_name: file_name.to_string(),
         total_chunks: merkle_tree_leaves.len(),
-        target_dir: pieces_dir,
+        chunks_dir,
         merkle_root,
         merkle_proofs,
         chunk_file_extension: String::from(FILE_CHUNK_EXTENSION),
         public,
     };
 
-    Ok(save_metadata(file_split_result).await?)
+    Ok(save_metadata(metadata).await?)
 }
 
 async fn split(
@@ -157,22 +161,19 @@ async fn split(
 pub async fn restore_original_file(
     pending_download_record: &PendingDownloadRecord,
 ) -> Result<FileMetadata, FileProcessingError> {
-    let file_processing_result: FileMetadata = tokio::fs::read(
-        pending_download_record
-            .download_path
-            .join(METADATA_FILE_NAME),
-    )
-    .await?
-    .try_into()?;
+    let file_metadata: FileMetadata =
+        tokio::fs::read(pending_download_record.chunks_dir.join(METADATA_FILE_NAME))
+            .await?
+            .try_into()?;
 
-    let parent_dir = file_processing_result.target_dir.parent().ok_or_else(|| {
+    let parent_dir = file_metadata.chunks_dir.parent().ok_or_else(|| {
         FileProcessingError::FileAccess(format!(
             "cannot get parent dir: {}",
-            &file_processing_result.target_dir.display()
+            &file_metadata.chunks_dir.display()
         ))
     })?;
 
-    let file_path = parent_dir.join(&file_processing_result.original_file_name);
+    let file_path = parent_dir.join(&file_metadata.original_file_name);
 
     if tokio::fs::try_exists(&file_path).await? {
         let metadata = tokio::fs::metadata(&file_path).await?;
@@ -182,19 +183,19 @@ pub async fn restore_original_file(
                 file_path.display()
             )));
         }
-        return Ok(file_processing_result);
+        return Ok(file_metadata);
     }
 
     let file = tokio::fs::File::create(&file_path).await?;
     let mut buf_writer = tokio::io::BufWriter::new(file);
-    for chunk in 0..file_processing_result.total_chunks {
-        let chunk_bytes = tokio::fs::read(file_processing_result.target_dir.join(format!(
+    for chunk in 0..file_metadata.total_chunks {
+        let chunk_bytes = tokio::fs::read(file_metadata.chunks_dir.join(format!(
             "{}.{}",
-            chunk, file_processing_result.chunk_file_extension
+            chunk, file_metadata.chunk_file_extension
         )))
         .await?;
         buf_writer.write(&chunk_bytes).await?;
     }
 
-    Ok(file_processing_result)
+    Ok(file_metadata)
 }
