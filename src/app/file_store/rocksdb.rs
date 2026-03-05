@@ -177,18 +177,18 @@ impl Store for RocksDBStore {
         .await?
     }
 
-    async fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
+    async fn put_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
         self.put(record, PUBLISHED_FILES_COLUMN_FAMILY_NAME).await
     }
 
-    async fn add_pending_download(
+    async fn put_pending_download(
         &self,
         record: PendingDownloadRecord,
     ) -> Result<(), FileStoreError> {
         self.put(record, PENDING_DOWNLOADS_COLUMN_FAMILY_NAME).await
     }
 
-    async fn persist_file_processing_result(
+    async fn put_file_processing_result(
         &self,
         record: FileProcessingResult,
     ) -> Result<(), FileStoreError> {

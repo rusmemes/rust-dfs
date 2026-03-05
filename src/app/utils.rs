@@ -1,5 +1,7 @@
 use crate::app::file_processing::errors::FileProcessingError;
 use crate::app::file_processing::processing::FileProcessingResult;
+use rs_merkle::algorithms::Sha256;
+use rs_merkle::{Hasher as MerkleHasher, MerkleProof};
 use std::io::{BufWriter, ErrorKind};
 use std::path::PathBuf;
 
@@ -33,4 +35,16 @@ fn save_blocking(
     let writer = BufWriter::new(file);
     serde_cbor::to_writer(writer, &result)?;
     Ok(result)
+}
+
+pub fn verify_chunk(
+    chunk: &[u8],
+    index: usize,
+    proof_bytes: &[u8],
+    root: [u8; 32],
+    total_leaves: usize,
+) -> bool {
+    let leaf = Sha256::hash(chunk);
+    let proof = MerkleProof::<Sha256>::from_bytes(proof_bytes).unwrap();
+    proof.verify(root, &[index], &[leaf], total_leaves)
 }

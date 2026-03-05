@@ -50,7 +50,8 @@ impl Server {
                 .build(),
             store.clone(),
             rx,
-            self.cli.max_active_downloads
+            tx.clone(),
+            self.cli.max_active_downloads,
         );
         self.spawn_task(p2p_service).await?;
 

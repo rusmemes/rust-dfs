@@ -30,6 +30,7 @@ pub struct P2pService<S: FileStore> {
     config: P2pServiceConfig,
     store: S,
     pub commands_rx: mpsc::Receiver<P2pCommand>,
+    pub commands_tx: mpsc::Sender<P2pCommand>,
     max_active_downloads: u16,
 }
 
@@ -38,12 +39,14 @@ impl<S: FileStore> P2pService<S> {
         config: P2pServiceConfig,
         store: S,
         commands_rx: mpsc::Receiver<P2pCommand>,
+        commands_tx: mpsc::Sender<P2pCommand>,
         max_active_downloads: u16,
     ) -> Self {
         Self {
             config,
             store,
             commands_rx,
+            commands_tx,
             max_active_downloads,
         }
     }
@@ -163,7 +166,11 @@ impl<S: FileStore> Service for P2pService<S> {
                 ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
             })?;
 
-        let mut event_service = EventService::new(self.store.clone(), self.max_active_downloads);
+        let mut event_service = EventService::new(
+            self.store.clone(),
+            self.max_active_downloads,
+            self.commands_tx.clone(),
+        );
 
         event_service
             .provide_all_published_files(&mut swarm)

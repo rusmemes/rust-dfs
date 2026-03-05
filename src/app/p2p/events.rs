@@ -9,7 +9,7 @@ use crate::app::p2p::domain::{
     P2pNetworkBehaviour, P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
-use crate::app::utils::METADATA_FILE_NAME;
+use crate::app::utils::{verify_chunk, METADATA_FILE_NAME};
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
@@ -24,34 +24,41 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{oneshot, Mutex, Semaphore};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
 
-pub struct MetadataProvidersRequestData {
+pub struct ProvidersRequestData<Req, Res> {
     found_providers: HashSet<PeerId>,
-    request: MetadataFileRequest,
-    result: oneshot::Sender<Option<FileProcessingResult>>,
+    request: Req,
+    result: oneshot::Sender<Option<Res>>,
 }
 
 // possible a memory leak for maps caching queries and requests data
 pub struct EventService<S: FileStore> {
     store: S,
-    metadata_providers_requests: HashMap<QueryId, MetadataProvidersRequestData>,
+    commands_tx: mpsc::Sender<P2pCommand>,
+    metadata_providers_requests:
+        HashMap<QueryId, ProvidersRequestData<MetadataFileRequest, FileProcessingResult>>,
+    file_providers_requests: HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
     metadata_download_requests:
         HashMap<OutboundRequestId, oneshot::Sender<Option<FileProcessingResult>>>,
+    file_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileResponse>>>,
     active_downloads: Arc<Mutex<HashSet<PublishedFileKey>>>,
     active_downloads_semaphore: Arc<Semaphore>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(store: S, max_active_downloads: u16) -> Self {
+    pub fn new(store: S, max_active_downloads: u16, commands_tx: mpsc::Sender<P2pCommand>) -> Self {
         Self {
             store,
+            commands_tx,
             metadata_providers_requests: HashMap::new(),
+            file_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
+            file_download_requests: HashMap::new(),
             active_downloads: Arc::new(Mutex::new(HashSet::new())),
             active_downloads_semaphore: Arc::new(Semaphore::new(max_active_downloads as usize)),
         }
@@ -61,6 +68,7 @@ impl<S: FileStore> EventService<S> {
         pending_download_record: &mut PendingDownloadRecord,
         semaphore: Arc<Semaphore>,
         store: FS,
+        commands_tx: mpsc::Sender<P2pCommand>,
     ) -> anyhow::Result<bool> {
         let file_processing_result: FileProcessingResult = tokio::fs::read(
             pending_download_record
@@ -80,17 +88,18 @@ impl<S: FileStore> EventService<S> {
             }
 
             let download_file_chunk = DownloadFileChunk {
+                file_id: pending_download_record.key.clone().into(),
                 chunk_id,
-                merkle_root: file_processing_result.merkle_root.clone(),
-                merkle_proof: file_processing_result.merkle_proofs[chunk_id].clone(),
+                target_dir: pending_download_record.download_path.clone(),
             };
 
             let local_semaphore = semaphore.clone();
+            let sender = commands_tx.clone();
 
             join_set.spawn(tokio::spawn(async move {
                 let permit = local_semaphore.acquire().await?;
                 debug!("permit acquired {:?}", permit);
-                let result = Self::download_file_chunk(download_file_chunk).await;
+                let result = Self::download_file_chunk(download_file_chunk, sender).await;
                 debug!("permit released {:?}", permit);
                 result
             }));
@@ -101,16 +110,19 @@ impl<S: FileStore> EventService<S> {
             match result {
                 Ok(result) => match result {
                     Ok(result) => match result {
-                        Ok(chunk_id) => {
+                        Ok(Some(chunk_id)) => {
                             info!(target: LOG_TARGET, "{}: chunk {} has been downloaded", &file_processing_result.original_file_name, chunk_id);
                             if pending_download_record.downloaded_chunks.insert(chunk_id) {
                                 if let Err(error) = store
-                                    .add_pending_download(pending_download_record.clone())
+                                    .put_pending_download(pending_download_record.clone())
                                     .await
                                 {
                                     error!("failed to update pending download: {}", error);
                                 }
                             }
+                        }
+                        Ok(None) => {
+                            debug!(target: LOG_TARGET, "no file chunk present");
                         }
                         Err(error) => {
                             error!(target: LOG_TARGET, "{}: failed to download chunk: {}", &file_processing_result.original_file_name, error);
@@ -141,9 +153,73 @@ impl<S: FileStore> EventService<S> {
                 == file_processing_result.merkle_proofs.len()))
     }
 
-    async fn download_file_chunk(download_file_chunk: DownloadFileChunk) -> anyhow::Result<usize> {
-        sleep(Duration::from_secs(1)).await;
-        Ok(download_file_chunk.chunk_id)
+    async fn download_file_chunk(
+        download_file_chunk: DownloadFileChunk,
+        commands_tx: mpsc::Sender<P2pCommand>,
+    ) -> anyhow::Result<Option<usize>> {
+        let (tx, rx) = oneshot::channel();
+
+        commands_tx
+            .send(P2pCommand::RequestFileChunk {
+                request: FileChunkRequest {
+                    file_id: download_file_chunk.file_id,
+                    chunk_id: download_file_chunk.chunk_id,
+                },
+                result: tx,
+            })
+            .await?;
+
+        Ok(match rx.await? {
+            Some(FileResponse::Success(bytes)) => {
+                Self::verify_and_save_file_chunk(&download_file_chunk, bytes).await?;
+                Some(download_file_chunk.chunk_id)
+            }
+            Some(FileResponse::Error(err)) => {
+                error!(target: LOG_TARGET, "failed to download chunk: {}", err);
+                None
+            }
+            _ => None,
+        })
+    }
+
+    async fn verify_and_save_file_chunk(
+        download_file_chunk: &DownloadFileChunk,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let file_processing_result: FileProcessingResult =
+            tokio::fs::read(download_file_chunk.target_dir.join(METADATA_FILE_NAME))
+                .await?
+                .try_into()?;
+
+        let is_correct = verify_chunk(
+            &bytes,
+            download_file_chunk.chunk_id,
+            file_processing_result
+                .merkle_proofs
+                .get(download_file_chunk.chunk_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("chunk {} not found", download_file_chunk.chunk_id)
+                })?,
+            file_processing_result.merkle_root,
+            file_processing_result.total_chunks,
+        );
+
+        if is_correct {
+            tokio::fs::write(
+                download_file_chunk.target_dir.join(format!(
+                    "{}.{}",
+                    download_file_chunk.chunk_id, file_processing_result.chunk_file_extension
+                )),
+                &bytes,
+            )
+            .await?;
+
+            // TODO: start providing ???
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("downloaded chunk is not correct"))
+        }
     }
 
     pub async fn work_on_pending_downloads(&mut self) {
@@ -168,9 +244,16 @@ impl<S: FileStore> EventService<S> {
                     {
                         let semaphore = self.active_downloads_semaphore.clone();
                         let store = self.store.clone();
+                        let command_tx = self.commands_tx.clone();
+
                         tokio::spawn(async move {
-                            match Self::download(&mut pending_download_record, semaphore, store)
-                                .await
+                            match Self::download(
+                                &mut pending_download_record,
+                                semaphore,
+                                store,
+                                command_tx,
+                            )
+                            .await
                             {
                                 Ok(completed) => {
                                     if completed {
@@ -209,7 +292,7 @@ impl<S: FileStore> EventService<S> {
                 let query_id = swarm.behaviour_mut().kademlia.get_providers(key);
                 self.metadata_providers_requests.insert(
                     query_id,
-                    MetadataProvidersRequestData {
+                    ProvidersRequestData {
                         found_providers: HashSet::new(),
                         request,
                         result,
@@ -217,7 +300,17 @@ impl<S: FileStore> EventService<S> {
                 );
             }
             P2pCommand::RequestFileChunk { request, result } => {
-                // TODO
+                let key: PublishedFileKey = request.file_id.into();
+                let key = RecordKey::new(&key.0);
+                let query_id = swarm.behaviour_mut().kademlia.get_providers(key);
+                self.file_providers_requests.insert(
+                    query_id,
+                    ProvidersRequestData {
+                        found_providers: HashSet::new(),
+                        request,
+                        result,
+                    },
+                );
             }
         }
     }
@@ -294,7 +387,7 @@ impl<S: FileStore> EventService<S> {
         let published_file_record: PublishedFileRecord = file_processing_result.into();
         while let Err(error) = self
             .store
-            .add_published_file(published_file_record.clone())
+            .put_published_file(published_file_record.clone())
             .await
         {
             error!(target: LOG_TARGET, "Failed to add published file: {}", error);
@@ -386,20 +479,22 @@ impl<S: FileStore> EventService<S> {
                 } => {
                     if let Some(data) = self.metadata_providers_requests.get_mut(&id) {
                         data.found_providers.extend(providers)
+                    } else if let Some(data) = self.file_providers_requests.get_mut(&id) {
+                        data.found_providers.extend(providers)
                     }
                 }
                 GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => {
-                    self.handle_all_possible_metadata_providers_found(swarm, &id);
+                    self.handle_all_possible_providers_found(swarm, &id);
                 }
             },
             Err(error) => {
                 error!(target: LOG_TARGET, "Error getting providers: {:?}", error);
-                self.handle_all_possible_metadata_providers_found(swarm, &id);
+                self.handle_all_possible_providers_found(swarm, &id);
             }
         }
     }
 
-    fn handle_all_possible_metadata_providers_found(
+    fn handle_all_possible_providers_found(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         id: &QueryId,
@@ -413,6 +508,17 @@ impl<S: FileStore> EventService<S> {
 
                 self.metadata_download_requests
                     .insert(request_id, data.result);
+            } else if let Err(result) = data.result.send(None) {
+                error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
+            }
+        } else if let Some(data) = self.file_providers_requests.remove(&id) {
+            if let Some(peer) = data.found_providers.iter().next() {
+                let request_id = swarm
+                    .behaviour_mut()
+                    .file_download
+                    .send_request(peer, data.request);
+
+                self.file_download_requests.insert(request_id, data.result);
             } else if let Err(result) = data.result.send(None) {
                 error!(target: LOG_TARGET, "Error calling oneshot channel to provide metadata response: {:?}", result);
             }
@@ -486,6 +592,16 @@ impl<S: FileStore> EventService<S> {
             .send_response(channel, file_response)
         {
             error!(target: LOG_TARGET, "Error sending metadata download response: {:?}", error);
+        }
+    }
+
+    fn handle_file_download_response(
+        &mut self,
+        response: FileResponse,
+        channel: oneshot::Sender<Option<FileResponse>>,
+    ) {
+        if let Err(error) = channel.send(Some(response)) {
+            error!(target: LOG_TARGET, "Error sending file download response: {:?}", error);
         }
     }
 
@@ -568,10 +684,12 @@ impl<S: FileStore> EventService<S> {
                         };
                     }
                     Response {
-                        request_id: _request_id,
+                        request_id,
                         response,
                     } => {
-                        info!(target: LOG_TARGET, "File download response: {:?}", response);
+                        if let Some(channel) = self.file_download_requests.remove(&request_id) {
+                            self.handle_file_download_response(response, channel);
+                        }
                     }
                 }
             }
@@ -664,7 +782,8 @@ impl<S: FileStore> EventService<S> {
                 downloaded_chunks,
             })) => {
                 if downloaded_chunks.contains(&chunk_id) {
-                    self.get_from_chunks(swarm, chunk_id, channel, download_path).await;
+                    self.get_from_chunks(swarm, chunk_id, channel, download_path)
+                        .await;
                 } else {
                     self.send_file_response(swarm, channel, FileResponse::NotFound);
                 }

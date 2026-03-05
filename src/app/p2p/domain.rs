@@ -4,6 +4,7 @@ use libp2p::request_response::cbor;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{dcutr, gossipsub, identify, kad, mdns, ping, relay};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -31,7 +32,7 @@ pub enum P2pCommand {
     },
     RequestFileChunk {
         request: FileChunkRequest,
-        result: oneshot::Sender<FileResponse>,
+        result: oneshot::Sender<Option<FileResponse>>,
     },
 }
 
@@ -57,7 +58,7 @@ pub struct PublishedFile {
 
 #[derive(Debug)]
 pub struct DownloadFileChunk {
+    pub file_id: u64,
     pub chunk_id: usize,
-    pub merkle_root: [u8; 32],
-    pub merkle_proof: Vec<u8>,
+    pub target_dir: PathBuf,
 }

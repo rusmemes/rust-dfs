@@ -12,7 +12,6 @@ use crate::app::server::Service;
 use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
 use log::info;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -44,7 +43,7 @@ where
         let key: PublishedFileKey = file_split_result.key().into();
 
         self.store
-            .persist_file_processing_result(file_split_result)
+            .put_file_processing_result(file_split_result)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -116,7 +115,7 @@ where
             .map_err(|e| Status::internal(e.to_string()))?;
 
         self.store
-            .add_pending_download(pending_download)
+            .put_pending_download(pending_download)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

@@ -19,7 +19,7 @@ pub struct PendingDownloadRecord {
     pub key: PublishedFileKey,
     pub original_file_name: String,
     pub download_path: PathBuf,
-    pub downloaded_chunks: HashSet<usize>
+    pub downloaded_chunks: HashSet<usize>,
 }
 
 impl PendingDownloadRecord {
@@ -28,7 +28,7 @@ impl PendingDownloadRecord {
             key,
             original_file_name,
             download_path,
-            downloaded_chunks: HashSet::new()
+            downloaded_chunks: HashSet::new(),
         }
     }
 }
@@ -44,7 +44,7 @@ impl<T> Persistable for T where
 }
 
 pub trait Iterable: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static {}
-impl <T> Iterable for T where T: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static {}
+impl<T> Iterable for T where T: TryFrom<Vec<u8>, Error = serde_cbor::Error> + Send + 'static {}
 
 impl TryInto<(PublishedFileKey, Vec<u8>)> for PublishedFileRecord {
     type Error = serde_cbor::Error;
