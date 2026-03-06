@@ -12,6 +12,7 @@ use crate::app::server::Service;
 use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
 use log::{error, info};
+use moka::future::Cache;
 use std::path::PathBuf;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
@@ -182,8 +183,15 @@ where
         let (grpc_tx, grpc_rx) = mpsc::channel(64);
 
         let command_sender = self.command_sender.clone();
+        let store = self.store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+            let cache: Cache<u64, ()> = Cache::builder()
+                .max_capacity(1_000)
+                .time_to_live(std::time::Duration::from_secs(60))
+                .build();
+
             loop {
                 select! {
                     msg = rx.recv() => match msg {
@@ -191,19 +199,26 @@ where
                             break;
                         }
                         Some(found) => {
-                            if let Err(_) = grpc_tx
-                                .send(Ok(SearchResponse {
-                                    file_id: found.file_id,
-                                    file_name: found.file_name,
-                                }))
-                                .await
-                            {
-                                if let Err(error) = command_sender
-                                    .send(P2pCommand::FileSearchAbort(search_value.clone()))
-                                    .await
-                                {
-                                    error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
+                            if !store.published_file_exists(found.file_id.into()).await.unwrap_or(false) {
+                                if !cache.contains_key(&found.file_id) {
+                                    if let Err(_) = grpc_tx
+                                        .send(Ok(SearchResponse {
+                                            file_id: found.file_id,
+                                            file_name: found.file_name,
+                                        }))
+                                        .await
+                                    {
+                                        if let Err(error) = command_sender
+                                            .send(P2pCommand::FileSearchAbort(search_value.clone()))
+                                            .await
+                                        {
+                                            error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
+                                        }
+                                    } else {
+                                        cache.insert(found.file_id, ()).await;
+                                    }
                                 }
+
                             }
                         }
                     },
