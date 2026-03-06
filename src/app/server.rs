@@ -44,10 +44,15 @@ impl Server {
         // p2p commands channel
         let (tx, rx) = mpsc::channel(100);
 
+        let mut builder = P2pServiceConfig::builder()
+            .with_keypair_file(self.cli.base_path.join("key.keypair"));
+
+        if let Some(topic) = &self.cli.file_search_topic {
+            builder = builder.with_file_search_topic(topic.clone());
+        }
+        
         let p2p_service = P2pService::new(
-            P2pServiceConfig::builder()
-                .with_keypair_file(self.cli.base_path.join("key.keypair"))
-                .build(),
+            builder.build(),
             store.clone(),
             rx,
             tx.clone(),

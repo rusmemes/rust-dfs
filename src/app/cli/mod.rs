@@ -29,6 +29,8 @@ pub struct Cli {
     pub grpc_port: u16,
     #[arg(short, long, default_value_t = 10)]
     pub max_active_downloads: u16,
+    #[arg(short, long)]
+    pub file_search_topic: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }

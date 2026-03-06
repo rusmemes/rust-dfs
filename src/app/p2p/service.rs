@@ -140,6 +140,13 @@ fn with_behaviour(
             )],
             request_response::Config::default(),
         ),
+        file_search_results: cbor::Behaviour::new(
+            [(
+                StreamProtocol::new("/dfs/1.0.0/file-search-results"),
+                request_response::ProtocolSupport::Full,
+            )],
+            request_response::Config::default(),
+        ),
     })
 }
 
@@ -159,15 +166,17 @@ impl<S: FileStore> Service for P2pService<S> {
 
         swarm.behaviour_mut().kademlia.set_mode(Some(Mode::Server));
 
-        swarm
-            .behaviour_mut()
-            .gossipsub
-            .subscribe(&IdentTopic::new("available_files"))
-            .map_err(|error| {
-                ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
-            })?;
+        if let Some(topic) = &self.config.file_search_topic {
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&IdentTopic::new(topic.clone()))
+                .map_err(|error| {
+                    ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
+                })?;
+        }
 
-        let mut event_service = EventService::new(self.store.clone());
+        let mut event_service = EventService::new(self.store.clone(), self.config.clone());
 
         let mut file_download_service = FileDownloadService::new(
             self.store.clone(),
@@ -180,11 +189,11 @@ impl<S: FileStore> Service for P2pService<S> {
             .await?;
 
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
-        
+
         loop {
             select! {
                 result = self.store.get_next_file_metadata() => event_service.file_publish(&mut swarm, result).await,
-                event = swarm.select_next_some() => event_service.handle_swarm_event(&mut swarm, event).await,
+                event = swarm.select_next_some() => event_service.handle_swarm_event(&mut swarm, self.commands_tx.clone(), event).await,
                 command = self.commands_rx.recv() => {
                     if let Some(command) = command {
                         event_service.handle_command(&mut swarm, command).await

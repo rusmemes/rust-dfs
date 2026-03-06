@@ -4,13 +4,15 @@ use crate::app::file_store::domain::{
 };
 use crate::app::file_store::errors::FileStoreError;
 use crate::app::file_store::FileStore;
+use crate::app::p2p::config::P2pServiceConfig;
 use crate::app::p2p::domain::{
-    FileChunkRequest, FileResponse, MetadataFileRequest, P2pCommand, P2pNetworkBehaviour,
-    P2pNetworkBehaviourEvent, PublishedFile,
+    FileChunkRequest, FileFound, FileResponse, FileSearchRequest, FileSearchResult,
+    MetadataFileRequest, P2pCommand, P2pNetworkBehaviour, P2pNetworkBehaviourEvent, PublishedFile,
 };
 use crate::app::p2p::errors::P2pNetworkError;
 use crate::app::utils::{choose_random, METADATA_FILE_NAME};
 use libp2p::futures::StreamExt;
+use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::{
     GetProvidersOk, GetProvidersResult, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
@@ -23,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
@@ -37,21 +39,26 @@ struct ProvidersRequestData<Req, Res> {
 // possible a memory leak for maps caching queries and requests data
 pub struct EventService<S: FileStore> {
     store: S,
+    config: P2pServiceConfig,
     metadata_providers_requests:
         HashMap<QueryId, ProvidersRequestData<MetadataFileRequest, FileMetadata>>,
-    file_chunk_providers_requests: HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
+    file_chunk_providers_requests:
+        HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
     metadata_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileMetadata>>>,
     file_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileResponse>>>,
+    file_search_sessions: HashMap<String, mpsc::Sender<FileFound>>,
 }
 
 impl<S: FileStore> EventService<S> {
-    pub fn new(store: S) -> Self {
+    pub fn new(store: S, config: P2pServiceConfig) -> Self {
         Self {
             store,
+            config,
             metadata_providers_requests: HashMap::new(),
             file_chunk_providers_requests: HashMap::new(),
             metadata_download_requests: HashMap::new(),
             file_download_requests: HashMap::new(),
+            file_search_sessions: HashMap::new(),
         }
     }
 
@@ -105,6 +112,41 @@ impl<S: FileStore> EventService<S> {
                 if let Err(error) = self.provide_file_chunk(swarm, &request).await {
                     error!(target: LOG_TARGET, "failed to provide file chunk: {}", error);
                 }
+            }
+            P2pCommand::FileSearch(original_request, tx) => {
+                if let Some(topic) = &self.config.file_search_topic {
+                    let session_id = original_request.session_id.clone();
+                    let request: Result<Vec<u8>, serde_cbor::Error> =
+                        original_request.try_into();
+
+                    match request {
+                        Ok(bytes) => {
+                            if let Err(error) = swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .publish(IdentTopic::new(topic.clone()), bytes)
+                            {
+                                error!(target: LOG_TARGET, "failed to search for file: {:?}", error);
+                            } else {
+                                self.file_search_sessions.insert(session_id, tx);
+                            }
+                        }
+                        Err(error) => {
+                            error!(target: LOG_TARGET, "failed to search for file: {:?}", error);
+                        }
+                    }
+                } else {
+                    error!(target: LOG_TARGET, "failed to get file search topic");
+                }
+            }
+            P2pCommand::FileSearchAbort(session_id) => {
+                self.file_search_sessions.remove(&session_id);
+            }
+            P2pCommand::FileSearchResult(peer_id, file_search_result) => {
+                swarm
+                    .behaviour_mut()
+                    .file_search_results
+                    .send_request(&peer_id, file_search_result);
             }
         }
     }
@@ -238,6 +280,7 @@ impl<S: FileStore> EventService<S> {
     pub async fn handle_swarm_event(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
+        tx: mpsc::Sender<P2pCommand>,
         event: SwarmEvent<P2pNetworkBehaviourEvent>,
     ) {
         use P2pNetworkBehaviourEvent::*;
@@ -247,12 +290,13 @@ impl<S: FileStore> EventService<S> {
                 Identify(event) => self.identify(swarm, event),
                 Mdns(event) => self.mdns(swarm, event),
                 Kademlia(event) => self.kademlia(swarm, event),
-                Gossipsub(event) => self.gossipsub(event),
+                Gossipsub(event) => self.gossipsub(tx.clone(), event),
                 RelayServer(event) => log_debug(&event),
                 RelayClient(event) => log_debug(&event),
                 Dcutr(event) => log_debug(&event),
                 FileDownload(event) => self.file_download(swarm, event).await,
                 MetadataDownload(event) => self.metadata_download(swarm, event).await,
+                FileSearchResults(event) => self.file_search_results(swarm, event).await,
                 _ => log_debug(&event),
             },
             NewListenAddr {
@@ -260,6 +304,49 @@ impl<S: FileStore> EventService<S> {
                 address,
             } => info!(target: LOG_TARGET, "Listening on {:?}", address),
             _ => log_debug(&event),
+        }
+    }
+
+    async fn file_search_results(
+        &mut self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        event: request_response::Event<FileSearchResult, ()>,
+    ) {
+        use request_response::Event::*;
+        match event {
+            Message {
+                peer: _peer_id,
+                connection_id: _connection_id,
+                message,
+            } => {
+                use request_response::Message::*;
+                match message {
+                    Request {
+                        request_id: _request_id,
+                        request,
+                        channel,
+                    } => {
+                        let _ = swarm
+                            .behaviour_mut()
+                            .file_search_results
+                            .send_response(channel, ());
+
+                        if let Some(tx) = self.file_search_sessions.get(&request.session_id) {
+                            if let Err(_) = tx
+                                .send(FileFound {
+                                    file_id: request.file_found.file_id,
+                                    file_name: request.file_found.file_name.clone(),
+                                })
+                                .await
+                            {
+                                self.file_search_sessions.remove(&request.session_id);
+                            }
+                        }
+                    }
+                    Response { .. } => {}
+                }
+            }
+            _ => {}
         }
     }
 
@@ -617,15 +704,70 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn gossipsub(&mut self, event: gossipsub::Event) {
+    fn gossipsub(&mut self, tx: mpsc::Sender<P2pCommand>, event: gossipsub::Event) {
         use gossipsub::Event::*;
         match event {
             Message {
-                propagation_source: _propagation_source,
+                propagation_source,
                 message_id: _message_id,
                 message,
             } => {
-                info!(target: LOG_TARGET, "[gossipsub] message: {:?}", message);
+                if let Some(topic) = &self.config.file_search_topic {
+                    if message.topic == IdentTopic::new(topic).hash() {
+                        let request: Result<FileSearchRequest, serde_cbor::Error> =
+                            message.data.try_into();
+                        match request {
+                            Ok(request) => {
+                                let commands = tx.clone();
+                                let store = self.store.clone();
+                                tokio::spawn(async move {
+                                    let mut stream = store.stream_published_files();
+                                    while let Some(result) = stream.next().await {
+                                        match result {
+                                            Ok(published_file_record) => {
+                                                if published_file_record.public
+                                                    && published_file_record
+                                                        .original_file_name
+                                                        .contains(&request.search_value)
+                                                {
+                                                    if let Err(error) = commands
+                                                        .send(P2pCommand::FileSearchResult(
+                                                            propagation_source.clone(),
+                                                            FileSearchResult {
+                                                                session_id: request
+                                                                    .session_id
+                                                                    .clone(),
+                                                                file_found: FileFound {
+                                                                    file_id: published_file_record
+                                                                        .key
+                                                                        .into(),
+                                                                    file_name:
+                                                                        published_file_record
+                                                                            .original_file_name,
+                                                                },
+                                                            },
+                                                        ))
+                                                        .await
+                                                    {
+                                                        error!(target: LOG_TARGET, "Error sending P2pCommand: {:?}", error);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                error!(target: LOG_TARGET, "Error reading published file: {:?}", error);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            Err(error) => {
+                                error!(target: LOG_TARGET, "Error deserializing message: {:?}", error);
+                            }
+                        }
+                    }
+                }
             }
             _ => log_debug(&event),
         }

@@ -7,12 +7,13 @@ use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
 use crate::app::grpc::dfs_grpc::{PublishFileResponse, SearchRequest, SearchResponse};
 use crate::app::grpc::errors::GrpcServerError;
-use crate::app::p2p::domain::{MetadataFileRequest, P2pCommand};
+use crate::app::p2p::domain::{FileSearchRequest, MetadataFileRequest, P2pCommand};
 use crate::app::server::Service;
 use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
-use log::info;
+use log::{error, info};
 use std::path::PathBuf;
+use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -110,7 +111,8 @@ where
             .await
             .map_err(|_| Status::new(Code::Internal, "failed to receive metadata response"))?;
 
-        let metadata = metadata.ok_or_else(|| Status::new(Code::Internal, "missing metadata file"))?;
+        let metadata =
+            metadata.ok_or_else(|| Status::new(Code::Internal, "missing metadata file"))?;
 
         let file_path = download_path.join(&metadata.original_file_name);
 
@@ -118,13 +120,17 @@ where
             return Err(Status::already_exists(file_path.to_string_lossy()));
         }
 
-        let chunks_dir = download_path.join(format!("{}_chunks", metadata.get_chunks_dir_name_prefix()));
+        let chunks_dir =
+            download_path.join(format!("{}_chunks", metadata.get_chunks_dir_name_prefix()));
 
         ensure_dir_exists_or_create(&chunks_dir)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let metadata = FileMetadata { chunks_dir, ..metadata };
+        let metadata = FileMetadata {
+            chunks_dir,
+            ..metadata
+        };
 
         let pending_download = PendingDownloadRecord::new(
             metadata.key().into(),
@@ -155,19 +161,68 @@ where
         &self,
         request: Request<SearchRequest>,
     ) -> Result<Response<Self::SearchStream>, Status> {
-        let (tx, rx) = mpsc::channel(32);
+        let search_value = request.into_inner().search_value;
 
+        let (tx, mut rx) = mpsc::channel(64);
+
+        if let Err(error) = self
+            .command_sender
+            .send(P2pCommand::FileSearch(
+                FileSearchRequest {
+                    session_id: search_value.clone(),
+                    search_value: search_value.clone(),
+                },
+                tx,
+            ))
+            .await
+        {
+            return Err(Status::internal(error.to_string()));
+        }
+
+        let (grpc_tx, grpc_rx) = mpsc::channel(64);
+
+        let command_sender = self.command_sender.clone();
         tokio::spawn(async move {
-            // example
-            let _ = tx
-                .send(Ok(SearchResponse {
-                    file_id: 1,
-                    file_name: "example.txt".into(),
-                }))
-                .await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            loop {
+                select! {
+                    msg = rx.recv() => match msg {
+                        None => {
+                            break;
+                        }
+                        Some(found) => {
+                            if let Err(_) = grpc_tx
+                                .send(Ok(SearchResponse {
+                                    file_id: found.file_id,
+                                    file_name: found.file_name,
+                                }))
+                                .await
+                            {
+                                if let Err(error) = command_sender
+                                    .send(P2pCommand::FileSearchAbort(search_value.clone()))
+                                    .await
+                                {
+                                    error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
+                                }
+                            }
+                        }
+                    },
+                    _ = interval.tick() => {
+                        if grpc_tx.is_closed() {
+                            if let Err(error) = command_sender
+                                .send(P2pCommand::FileSearchAbort(search_value.clone()))
+                                .await
+                            {
+                                error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
+                            }
+                        }
+                    },
+                }
+            }
+            info!(target: LOG_TARGET, "connection closed: {}", search_value);
         });
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+        Ok(Response::new(ReceiverStream::new(grpc_rx)))
     }
 }
 

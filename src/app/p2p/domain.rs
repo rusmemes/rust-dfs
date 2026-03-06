@@ -2,10 +2,10 @@ use crate::app::file_processing::processing::FileMetadata;
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response::cbor;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{dcutr, gossipsub, identify, kad, mdns, ping, relay};
+use libp2p::{dcutr, gossipsub, identify, kad, mdns, ping, relay, PeerId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MetadataFileRequest {
@@ -25,6 +25,40 @@ pub enum FileResponse {
     Error(String),
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileFound {
+    pub file_id: u64,
+    pub file_name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileSearchResult {
+    pub session_id: String,
+    pub file_found: FileFound,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileSearchRequest {
+    pub session_id: String,
+    pub search_value: String,
+}
+
+impl TryInto<FileSearchRequest> for Vec<u8> {
+    type Error = serde_cbor::Error;
+
+    fn try_into(self) -> Result<FileSearchRequest, Self::Error> {
+        serde_cbor::from_slice(&self)
+    }
+}
+
+impl TryInto<Vec<u8>> for FileSearchRequest {
+    type Error = serde_cbor::Error;
+
+    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
+        serde_cbor::to_vec(&self)
+    }
+}
+
 pub enum P2pCommand {
     RequestMetadata {
         request: MetadataFileRequest,
@@ -36,6 +70,10 @@ pub enum P2pCommand {
     },
     ProvideMetadata(FileMetadata),
     ProvideFileChunk(FileChunkRequest),
+
+    FileSearch(FileSearchRequest, mpsc::Sender<FileFound>),
+    FileSearchResult(PeerId, FileSearchResult),
+    FileSearchAbort(String)
 }
 
 #[derive(NetworkBehaviour)]
@@ -50,6 +88,7 @@ pub struct P2pNetworkBehaviour {
     pub dcutr: dcutr::Behaviour,
     pub file_download: cbor::Behaviour<FileChunkRequest, FileResponse>,
     pub metadata_download: cbor::Behaviour<MetadataFileRequest, FileResponse>,
+    pub file_search_results: cbor::Behaviour<FileSearchResult, ()>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
