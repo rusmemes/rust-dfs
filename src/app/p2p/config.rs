@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 pub struct P2pServiceConfig {
     pub keypair_file: PathBuf,
     pub file_search_topic: Option<String>,
+    pub bootstrap_peers: Vec<String>,
 }
 
 impl P2pServiceConfig {
@@ -32,6 +33,11 @@ impl P2pServiceConfigBuilder {
 
     pub fn with_file_search_topic(mut self, topic: String) -> Self {
         self.config.file_search_topic = Some(topic);
+        self
+    }
+
+    pub fn with_bootstrap_peers(mut self, peers: Vec<String>) -> Self {
+        self.config.bootstrap_peers = peers;
         self
     }
 

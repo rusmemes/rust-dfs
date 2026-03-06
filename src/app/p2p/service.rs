@@ -12,11 +12,12 @@ use libp2p::gossipsub::IdentTopic;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::Mode;
+use libp2p::multiaddr::Protocol;
 use libp2p::relay::client::Behaviour;
 use libp2p::request_response::cbor;
 use libp2p::{
-    dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, request_response, tcp,
-    yamux, StreamProtocol, Swarm,
+    dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, request_response, tcp, yamux,
+    Multiaddr, StreamProtocol, Swarm,
 };
 use log::info;
 use std::error::Error;
@@ -174,6 +175,24 @@ impl<S: FileStore> Service for P2pService<S> {
                 .map_err(|error| {
                     ServerError::P2pNetwork(P2pNetworkError::Libp2pGossipsubSubscription(error))
                 })?;
+        }
+
+        for bootstrap_peer_str in &self.config.bootstrap_peers {
+            let addr: Multiaddr = bootstrap_peer_str.parse().map_err(|error| {
+                ServerError::Custom(format!(
+                    "bootstrap peer address {} cannot be parsed: {:?}",
+                    bootstrap_peer_str, error
+                ))
+            })?;
+
+            if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+            } else {
+                return Err(ServerError::Custom(format!(
+                    "Peer ID does not exist in {bootstrap_peer_str}!"
+                )));
+            }
         }
 
         let mut event_service = EventService::new(self.store.clone(), self.config.clone());

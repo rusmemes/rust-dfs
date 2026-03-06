@@ -31,6 +31,8 @@ pub struct Cli {
     pub max_active_downloads: u16,
     #[arg(short, long)]
     pub file_search_topic: Option<String>,
+    #[arg(long)]
+    pub bootstrap_peers: Vec<String>,
     #[command(subcommand)]
     pub command: Command,
 }

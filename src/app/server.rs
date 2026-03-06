@@ -45,7 +45,8 @@ impl Server {
         let (tx, rx) = mpsc::channel(100);
 
         let mut builder = P2pServiceConfig::builder()
-            .with_keypair_file(self.cli.base_path.join("key.keypair"));
+            .with_keypair_file(self.cli.base_path.join("key.keypair"))
+            .with_bootstrap_peers(self.cli.bootstrap_peers.clone());
 
         if let Some(topic) = &self.cli.file_search_topic {
             builder = builder.with_file_search_topic(topic.clone());
