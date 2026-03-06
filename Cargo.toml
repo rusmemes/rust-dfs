@@ -24,6 +24,7 @@ clap = { version = "4.5.60", features = ["derive", "string"] }
 clap_derive = "4.5.55"
 homedir = "0.3.6"
 rand = "0.10.0"
+tokio-stream = "0.1.18"
 
 [build-dependencies]
 tonic-prost-build = "0.14.5"

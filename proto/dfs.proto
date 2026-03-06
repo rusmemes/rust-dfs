@@ -7,6 +7,7 @@ import "google/protobuf/empty.proto";
 service Dfs {
     rpc PublishFile (PublishFileRequest) returns (PublishFileResponse);
     rpc DownloadFile (DownloadFileRequest) returns (DownloadFileResponse);
+    rpc Search (SearchRequest) returns (stream SearchResponse);
 }
 
 message PublishFileRequest {
@@ -25,4 +26,13 @@ message DownloadFileRequest {
 
 message DownloadFileResponse {
     google.protobuf.Empty ok = 1;
+}
+
+message SearchRequest {
+    string search_value = 1;
+}
+
+message SearchResponse {
+    uint64 file_id = 1;
+    string file_name = 2;
 }

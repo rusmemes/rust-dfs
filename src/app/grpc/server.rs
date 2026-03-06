@@ -4,8 +4,8 @@ use crate::app::file_store::domain::{PendingDownloadRecord, PublishedFileKey};
 use crate::app::file_store::FileStore;
 use crate::app::grpc::dfs_grpc::dfs_server::Dfs;
 use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
-use crate::app::grpc::dfs_grpc::PublishFileResponse;
 use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
+use crate::app::grpc::dfs_grpc::{PublishFileResponse, SearchRequest, SearchResponse};
 use crate::app::grpc::errors::GrpcServerError;
 use crate::app::p2p::domain::{MetadataFileRequest, P2pCommand};
 use crate::app::server::Service;
@@ -14,9 +14,12 @@ use async_trait::async_trait;
 use log::info;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
+
+type SearchStream = ReceiverStream<Result<SearchResponse, Status>>;
 
 const LOG_TARGET: &str = "app::grpc::server";
 
@@ -144,6 +147,27 @@ where
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(DownloadFileResponse { ok: Some(()) }))
+    }
+
+    type SearchStream = SearchStream;
+
+    async fn search(
+        &self,
+        request: Request<SearchRequest>,
+    ) -> Result<Response<Self::SearchStream>, Status> {
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            // example
+            let _ = tx
+                .send(Ok(SearchResponse {
+                    file_id: 1,
+                    file_name: "example.txt".into(),
+                }))
+                .await;
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 
