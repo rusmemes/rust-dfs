@@ -214,6 +214,7 @@ Example:
 ``` bash
 cargo run -- start \
   --grpc-port 9999 \
+  --file-search-topic file-search \
   --max-active-downloads 10
 ```
 

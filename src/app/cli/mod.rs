@@ -25,8 +25,8 @@ pub enum Command {
 pub struct Cli {
     #[arg(short, long, default_value = default_base_path().into_os_string())]
     pub base_path: PathBuf,
-    #[arg(short, long, default_value_t = 9999)]
-    pub grpc_port: u16,
+    #[arg(short, long)]
+    pub grpc_port: Option<u16>,
     #[arg(short, long, default_value_t = 10)]
     pub max_active_downloads: u16,
     #[arg(short, long)]
