@@ -116,8 +116,7 @@ impl<S: FileStore> EventService<S> {
             P2pCommand::FileSearch(original_request, tx) => {
                 if let Some(topic) = &self.config.file_search_topic {
                     let session_id = original_request.session_id.clone();
-                    let request: Result<Vec<u8>, serde_cbor::Error> =
-                        original_request.try_into();
+                    let request: Result<Vec<u8>, serde_cbor::Error> = original_request.try_into();
 
                     match request {
                         Ok(bytes) => {
@@ -722,13 +721,15 @@ impl<S: FileStore> EventService<S> {
                                 let store = self.store.clone();
                                 tokio::spawn(async move {
                                     let mut stream = store.stream_published_files();
+                                    let search_value = request.search_value.to_lowercase();
                                     while let Some(result) = stream.next().await {
                                         match result {
                                             Ok(published_file_record) => {
                                                 if published_file_record.public
                                                     && published_file_record
                                                         .original_file_name
-                                                        .contains(&request.search_value)
+                                                        .to_lowercase()
+                                                        .contains(&search_value)
                                                 {
                                                     if let Err(error) = commands
                                                         .send(P2pCommand::FileSearchResult(
