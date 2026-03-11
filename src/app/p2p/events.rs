@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
@@ -717,51 +718,12 @@ impl<S: FileStore> EventService<S> {
                             message.data.try_into();
                         match request {
                             Ok(request) => {
-                                let commands = tx.clone();
-                                let store = self.store.clone();
-                                tokio::spawn(async move {
-                                    let mut stream = store.stream_published_files();
-                                    let search_value = request.search_value.to_lowercase();
-                                    while let Some(result) = stream.next().await {
-                                        match result {
-                                            Ok(published_file_record) => {
-                                                if published_file_record.public
-                                                    && published_file_record
-                                                        .original_file_name
-                                                        .to_lowercase()
-                                                        .contains(&search_value)
-                                                {
-                                                    if let Err(error) = commands
-                                                        .send(P2pCommand::FileSearchResult(
-                                                            propagation_source.clone(),
-                                                            FileSearchResult {
-                                                                session_id: request
-                                                                    .session_id
-                                                                    .clone(),
-                                                                file_found: FileFound {
-                                                                    file_id: published_file_record
-                                                                        .key
-                                                                        .into(),
-                                                                    file_name:
-                                                                        published_file_record
-                                                                            .original_file_name,
-                                                                },
-                                                            },
-                                                        ))
-                                                        .await
-                                                    {
-                                                        error!(target: LOG_TARGET, "Error sending P2pCommand: {:?}", error);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            Err(error) => {
-                                                error!(target: LOG_TARGET, "Error reading published file: {:?}", error);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                });
+                                tokio::spawn(Self::file_search(
+                                    propagation_source,
+                                    request,
+                                    tx.clone(),
+                                    self.store.clone(),
+                                ));
                             }
                             Err(error) => {
                                 error!(target: LOG_TARGET, "Error deserializing message: {:?}", error);
@@ -771,6 +733,49 @@ impl<S: FileStore> EventService<S> {
                 }
             }
             _ => log_debug(&event),
+        }
+    }
+
+    async fn file_search(
+        propagation_source: PeerId,
+        request: FileSearchRequest,
+        commands: Sender<P2pCommand>,
+        store: S,
+    ) {
+        let mut stream = store.stream_published_files();
+        let search_value = request.search_value.to_lowercase();
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(published_file_record) => {
+                    if published_file_record.public
+                        && published_file_record
+                            .original_file_name
+                            .to_lowercase()
+                            .contains(&search_value)
+                    {
+                        if let Err(error) = commands
+                            .send(P2pCommand::FileSearchResult(
+                                propagation_source.clone(),
+                                FileSearchResult {
+                                    session_id: request.session_id.clone(),
+                                    file_found: FileFound {
+                                        file_id: published_file_record.key.into(),
+                                        file_name: published_file_record.original_file_name,
+                                    },
+                                },
+                            ))
+                            .await
+                        {
+                            error!(target: LOG_TARGET, "Error sending P2pCommand: {:?}", error);
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    error!(target: LOG_TARGET, "Error reading published file: {:?}", error);
+                    break;
+                }
+            }
         }
     }
 
