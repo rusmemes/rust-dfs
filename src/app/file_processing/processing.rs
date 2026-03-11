@@ -186,16 +186,26 @@ pub async fn restore_original_file(
         return Ok(file_metadata);
     }
 
-    let file = tokio::fs::File::create(&file_path).await?;
+    let tmp_path = parent_dir.join(format!("{}.part", file_metadata.original_file_name));
+
+    let file = tokio::fs::File::create(&tmp_path).await?;
     let mut buf_writer = tokio::io::BufWriter::new(file);
+
     for chunk in 0..file_metadata.total_chunks {
-        let chunk_bytes = tokio::fs::read(file_metadata.chunks_dir.join(format!(
-            "{}.{}",
-            chunk, file_metadata.chunk_file_extension
-        )))
+        let chunk_bytes = tokio::fs::read(
+            file_metadata
+                .chunks_dir
+                .join(format!("{}.{}", chunk, file_metadata.chunk_file_extension)),
+        )
         .await?;
-        buf_writer.write(&chunk_bytes).await?;
+
+        buf_writer.write_all(&chunk_bytes).await?;
     }
+
+    buf_writer.flush().await?;
+    drop(buf_writer);
+
+    tokio::fs::rename(&tmp_path, &file_path).await?;
 
     Ok(file_metadata)
 }
