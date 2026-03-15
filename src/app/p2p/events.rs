@@ -26,7 +26,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 const LOG_TARGET: &str = "app::p2p::events";
@@ -47,7 +47,7 @@ pub struct EventService<S: FileStore> {
         HashMap<QueryId, ProvidersRequestData<FileChunkRequest, FileResponse>>,
     metadata_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileMetadata>>>,
     file_download_requests: HashMap<OutboundRequestId, oneshot::Sender<Option<FileResponse>>>,
-    file_search_sessions: HashMap<String, mpsc::Sender<FileFound>>,
+    file_search_sessions: HashMap<String, Sender<FileFound>>,
 }
 
 impl<S: FileStore> EventService<S> {
@@ -280,7 +280,7 @@ impl<S: FileStore> EventService<S> {
     pub async fn handle_swarm_event(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        tx: mpsc::Sender<P2pCommand>,
+        tx: Sender<P2pCommand>,
         event: SwarmEvent<P2pNetworkBehaviourEvent>,
     ) {
         use P2pNetworkBehaviourEvent::*;
@@ -704,7 +704,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    fn gossipsub(&mut self, tx: mpsc::Sender<P2pCommand>, event: gossipsub::Event) {
+    fn gossipsub(&mut self, tx: Sender<P2pCommand>, event: gossipsub::Event) {
         use gossipsub::Event::*;
         match event {
             Message {

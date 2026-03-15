@@ -199,8 +199,8 @@ where
                             break;
                         }
                         Some(found) => {
-                            if !store.published_file_exists(found.file_id.into()).await.unwrap_or(false) {
-                                if !cache.contains_key(&found.file_id) {
+                            if !cache.contains_key(&found.file_id) {
+                                if !store.published_file_exists(found.file_id.into()).await.unwrap_or(false) {
                                     if let Err(_) = grpc_tx
                                         .send(Ok(SearchResponse {
                                             file_id: found.file_id,
@@ -218,7 +218,6 @@ where
                                         cache.insert(found.file_id, ()).await;
                                     }
                                 }
-
                             }
                         }
                     },
