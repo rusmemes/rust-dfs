@@ -7,7 +7,7 @@ use crate::app::grpc::dfs_grpc::dfs_server::DfsServer;
 use crate::app::grpc::dfs_grpc::{DownloadFileRequest, DownloadFileResponse, PublishFileRequest};
 use crate::app::grpc::dfs_grpc::{PublishFileResponse, SearchRequest, SearchResponse};
 use crate::app::grpc::errors::GrpcServerError;
-use crate::app::p2p::domain::{FileSearchRequest, MetadataFileRequest, P2pCommand};
+use crate::app::p2p::domain::{FileFound, FileSearchRequest, MetadataFileRequest, P2pCommand};
 use crate::app::server::Service;
 use crate::app::utils::{ensure_dir_exists_or_create, save_metadata};
 use async_trait::async_trait;
@@ -15,6 +15,7 @@ use log::{error, info};
 use moka::future::Cache;
 use std::path::PathBuf;
 use tokio::select;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -164,7 +165,7 @@ where
     ) -> Result<Response<Self::SearchStream>, Status> {
         let search_value = request.into_inner().search_value;
 
-        let (tx, mut rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(64);
 
         if let Err(error) = self
             .command_sender
@@ -184,59 +185,78 @@ where
 
         let command_sender = self.command_sender.clone();
         let store = self.store.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        tokio::spawn(Self::search_task(
+            search_value,
+            rx,
+            grpc_tx,
+            command_sender,
+            store,
+        ));
 
-            let cache: Cache<u64, ()> = Cache::builder()
-                .max_capacity(1_000)
-                .time_to_live(std::time::Duration::from_secs(60))
-                .build();
+        Ok(Response::new(ReceiverStream::new(grpc_rx)))
+    }
+}
 
-            loop {
-                select! {
-                    msg = rx.recv() => match msg {
-                        None => {
-                            break;
-                        }
-                        Some(found) => {
-                            if !cache.contains_key(&found.file_id) {
-                                if !store.published_file_exists(found.file_id.into()).await.unwrap_or(false) {
-                                    if let Err(_) = grpc_tx
-                                        .send(Ok(SearchResponse {
-                                            file_id: found.file_id,
-                                            file_name: found.file_name,
-                                        }))
+impl<S> DfsService<S>
+where
+    S: FileStore,
+{
+    async fn search_task(
+        search_value: String,
+        mut rx: Receiver<FileFound>,
+        grpc_tx: Sender<Result<SearchResponse, Status>>,
+        command_sender: Sender<P2pCommand>,
+        store: S,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+        let cache: Cache<u64, ()> = Cache::builder()
+            .max_capacity(1_000)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build();
+
+        loop {
+            select! {
+                msg = rx.recv() => match msg {
+                    None => {
+                        break;
+                    }
+                    Some(found) => {
+                        if !cache.contains_key(&found.file_id) {
+                            if !store.published_file_exists(found.file_id.into()).await.unwrap_or(false) {
+                                if let Err(_) = grpc_tx
+                                    .send(Ok(SearchResponse {
+                                        file_id: found.file_id,
+                                        file_name: found.file_name,
+                                    }))
+                                    .await
+                                {
+                                    if let Err(error) = command_sender
+                                        .send(P2pCommand::FileSearchAbort(search_value.clone()))
                                         .await
                                     {
-                                        if let Err(error) = command_sender
-                                            .send(P2pCommand::FileSearchAbort(search_value.clone()))
-                                            .await
-                                        {
-                                            error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
-                                        }
-                                    } else {
-                                        cache.insert(found.file_id, ()).await;
+                                        error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
                                     }
+                                } else {
+                                    cache.insert(found.file_id, ()).await;
                                 }
                             }
                         }
-                    },
-                    _ = interval.tick() => {
-                        if grpc_tx.is_closed() {
-                            if let Err(error) = command_sender
-                                .send(P2pCommand::FileSearchAbort(search_value.clone()))
-                                .await
-                            {
-                                error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
-                            }
+                    }
+                },
+                _ = interval.tick() => {
+                    if grpc_tx.is_closed() {
+                        if let Err(error) = command_sender
+                            .send(P2pCommand::FileSearchAbort(search_value.clone()))
+                            .await
+                        {
+                            error!(target: LOG_TARGET, "failed to send search value abort error: {}", error);
                         }
-                    },
-                }
+                    }
+                },
             }
-            info!(target: LOG_TARGET, "connection closed: {}", search_value);
-        });
-
-        Ok(Response::new(ReceiverStream::new(grpc_rx)))
+        }
+        info!(target: LOG_TARGET, "connection closed: {}", search_value);
     }
 }
 
