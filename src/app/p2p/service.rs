@@ -211,7 +211,7 @@ impl<S: FileStore> Service for P2pService<S> {
 
         loop {
             select! {
-                result = self.store.get_next_file_metadata() => event_service.file_publish(&mut swarm, result).await,
+                biased; // to prioritize swarm events
                 event = swarm.select_next_some() => event_service.handle_swarm_event(&mut swarm, self.commands_tx.clone(), event).await,
                 command = self.commands_rx.recv() => {
                     if let Some(command) = command {
@@ -219,6 +219,7 @@ impl<S: FileStore> Service for P2pService<S> {
                     }
                 }
                 _ = ticker.tick() => file_download_service.work_on_pending_downloads(self.commands_tx.clone()).await,
+                result = self.store.get_next_file_metadata() => event_service.file_publish(&mut swarm, result).await,
                 _ = cancellation_token.cancelled() => {
                     info!(target: LOG_TARGET, "P2P networking service is shutting down because it received the shutdown signal.");
                     break

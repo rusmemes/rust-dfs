@@ -105,12 +105,12 @@ impl<S: FileStore> EventService<S> {
                 );
             }
             P2pCommand::ProvideMetadata(metadata) => {
-                if let Err(error) = self.provide_metadata(swarm, &metadata).await {
+                if let Err(error) = self.provide_metadata(swarm, &metadata) {
                     error!(target: LOG_TARGET, "failed to provide metadata: {}", error);
                 }
             }
             P2pCommand::ProvideFileChunk(request) => {
-                if let Err(error) = self.provide_file_chunk(swarm, &request).await {
+                if let Err(error) = self.provide_file_chunk(swarm, &request) {
                     error!(target: LOG_TARGET, "failed to provide file chunk: {}", error);
                 }
             }
@@ -151,7 +151,7 @@ impl<S: FileStore> EventService<S> {
         }
     }
 
-    async fn provide_metadata(
+    fn provide_metadata(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         metadata: &FileMetadata,
@@ -178,7 +178,7 @@ impl<S: FileStore> EventService<S> {
         Ok(())
     }
 
-    async fn provide_file_chunk(
+    fn provide_file_chunk(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         file_chunk: &FileChunkRequest,
@@ -198,16 +198,15 @@ impl<S: FileStore> EventService<S> {
         Ok(())
     }
 
-    async fn provide_all(
+    fn provide_all(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         metadata: &FileMetadata,
     ) -> Result<(), P2pNetworkError> {
-        self.provide_metadata(swarm, metadata).await?;
+        self.provide_metadata(swarm, metadata)?;
         let file_id: u64 = u64::from(PublishedFileKey(metadata.key().clone()));
         for chunk_id in 0..metadata.total_chunks {
-            self.provide_file_chunk(swarm, &FileChunkRequest { file_id, chunk_id })
-                .await?;
+            self.provide_file_chunk(swarm, &FileChunkRequest { file_id, chunk_id })?;
         }
         Ok(())
     }
@@ -222,7 +221,7 @@ impl<S: FileStore> EventService<S> {
             let published_file = result?;
             let metadata_buf = published_file.chunks_dir.join(METADATA_FILE_NAME);
             match tokio::fs::read(metadata_buf).await {
-                Ok(data) => self.provide_all(swarm, &data.try_into()?).await?,
+                Ok(data) => self.provide_all(swarm, &data.try_into()?)?,
                 Err(error) => error!(target: LOG_TARGET, "Error reading metadata file: {}", error),
             };
         }
@@ -237,7 +236,7 @@ impl<S: FileStore> EventService<S> {
     ) {
         match result {
             Ok(metadata) => {
-                while let Err(error) = self.provide_all(swarm, &metadata).await {
+                while let Err(error) = self.provide_all(swarm, &metadata) {
                     error!(target: LOG_TARGET, "Error providing file: {}", error);
                     sleep(Duration::from_secs(1)).await
                 }
