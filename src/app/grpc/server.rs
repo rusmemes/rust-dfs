@@ -28,7 +28,7 @@ const LOG_TARGET: &str = "app::grpc::server";
 
 pub struct DfsService<S: FileStore> {
     store: S,
-    command_sender: mpsc::Sender<P2pCommand>,
+    command_sender: Sender<P2pCommand>,
 }
 
 #[tonic::async_trait]
@@ -263,14 +263,14 @@ where
 pub struct GrpcService<S: FileStore> {
     port: u16,
     store: S,
-    command_sender: mpsc::Sender<P2pCommand>,
+    command_sender: Sender<P2pCommand>,
 }
 
 impl<S> GrpcService<S>
 where
     S: FileStore,
 {
-    pub fn new(port: u16, store: S, command_sender: mpsc::Sender<P2pCommand>) -> Self {
+    pub fn new(port: u16, store: S, command_sender: Sender<P2pCommand>) -> Self {
         Self {
             port,
             store,
